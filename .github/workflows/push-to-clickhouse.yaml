@@ -32,6 +32,17 @@ on:
         required: false
         type: string
         default: "10000"
+      model_type:
+        description: >-
+          Model type to scan (manual runs only — the scheduled run always
+          scans all)
+        required: false
+        type: choice
+        options:
+          - all
+          - generative
+          - embedding
+        default: all
 
 concurrency:
   # Scoped per-ref: a new commit on a given branch cancels and supersedes
@@ -147,15 +158,17 @@ jobs:
       - name: Generate shards
         id: generate
         run: |
-          # '10000' is the fallback for schedule-triggered runs, since the
-          # `inputs` context is only populated for workflow_dispatch (the
-          # input schema's default above only applies to the manual "Run
-          # workflow" form).
+          # '10000' / 'all' are the fallbacks for schedule-triggered runs,
+          # since the `inputs` context is only populated for
+          # workflow_dispatch (the input schema's defaults above only apply
+          # to the manual "Run workflow" form). The scheduled run must always
+          # scan 'all' regardless of what a prior manual dispatch selected.
           #
           # Shard sizes use the script's real defaults (250/500 for the
           # x1 tier, 100/50 for the x2/x4 tiers by parameter count).
           python .github/scripts/generate_weekly_shards.py \
             --top-k ${{ inputs.top_k || '10000' }} \
+            --model-type ${{ github.event_name == 'workflow_dispatch' && (inputs.model_type || 'all') || 'all' }} \
             --output-dir shards
 
       - name: Upload shard artifacts

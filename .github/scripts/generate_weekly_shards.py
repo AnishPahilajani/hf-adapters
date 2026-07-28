@@ -53,7 +53,7 @@ sys.path.insert(0, str(project_root))
 from utils.fetch_top_embedding_models import fetch_top_embedding_models  # noqa: E402
 from utils.fetch_top_generative_models import fetch_top_generative_models  # noqa: E402
 
-MODES = ("generative", "embedding")
+MODEL_TYPES = ("generative", "embedding")
 
 
 def _chunk(rows: list[dict], shard_size: int) -> list[list[dict]]:
@@ -88,7 +88,7 @@ def generate_shards(
     x2_shard_size: int,
     x4_shard_size: int,
     output_dir: Path,
-    modes: tuple[str, ...] = MODES,
+    model_types: tuple[str, ...] = MODEL_TYPES,
 ) -> list[dict]:
     """Fetch each requested mode's top-K list once, write shard JSON files,
     and return the combined matrix (list of {mode, shard_index, shard_file,
@@ -98,7 +98,7 @@ def generate_shards(
     module docstring), each chunked at its own shard size and tagged with
     the runner ("x1"/"x2"/"x4") that ends up handling it.
 
-    *modes* restricts which of MODES to fetch/shard — used by
+    *model_types* restricts which of MODEL_TYPES to fetch/shard — used by
     workflow_dispatch's model_type input so a manual run can scan just
     embedding models (much quicker, less resource-hungry) without the
     schedule-triggered full scan having to change.
@@ -108,7 +108,7 @@ def generate_shards(
         "generative": (fetch_top_generative_models, shard_size_generative),
         "embedding": (fetch_top_embedding_models, shard_size_embedding),
     }
-    fetchers = {mode: all_fetchers[mode] for mode in modes}
+    fetchers = {model_type: all_fetchers[model_type] for model_type in model_types}
 
     matrix: list[dict] = []
     for mode, (fetch_fn, shard_size) in fetchers.items():
@@ -222,7 +222,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--model-type",
-        choices=("all", *MODES),
+        choices=("all", *MODEL_TYPES),
         default="all",
         help="Restrict the scan to one mode (e.g. 'embedding' for a quick, "
         "low-resource manual run). 'all' (the default, and what the "
@@ -230,7 +230,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    modes = MODES if args.model_type == "all" else (args.model_type,)
+    model_types = MODEL_TYPES if args.model_type == "all" else (args.model_type,)
 
     matrix = generate_shards(
         top_k=args.top_k,
@@ -241,7 +241,7 @@ def main() -> None:
         x2_shard_size=args.x2_shard_size,
         x4_shard_size=args.x4_shard_size,
         output_dir=args.output_dir,
-        modes=modes,
+        model_types=model_types,
     )
 
     print(f"\nTotal shards across both modes: {len(matrix)}")

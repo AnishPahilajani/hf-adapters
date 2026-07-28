@@ -54,6 +54,7 @@ import torch.nn.functional as F
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
     PrecomputedRotaryEmbedding,
+    _get_lm_head,
     _pad_proj_input_simple,
     _pad_proj_output_simple,
     apply_rope_matmul,
@@ -230,7 +231,7 @@ def _run_forward(
     token_index,
     cache_position,
 ):
-    """GPT-NeoX causal-LM forward: backbone + embed_out (the LM head)."""
+    """GPT-NeoX causal-LM forward: backbone + LM head."""
     h = _run_backbone_forward(
         model,
         input_ids,
@@ -242,7 +243,7 @@ def _run_forward(
         token_index,
         cache_position,
     )
-    logits = model.embed_out(h)
+    logits = model._spyre_lm_head(h)
     return logits[..., : model.config.vocab_size]
 
 
@@ -285,9 +286,10 @@ def prepare_for_spyre(model):
         bb.rotary_emb, padded_head_dim=work_hd
     )
 
-    # GPT-NeoX names its output projection ``embed_out`` (not ``lm_head``);
-    # pad_lm_head resolves it via _get_lm_head, so no aliasing is needed.
+    # GPT-NeoX named its output projection ``embed_out`` pre-transformers-5.14
+    # and ``lm_head`` from 5.14 on; _get_lm_head resolves either name.
     pad_lm_head(model)
+    model._spyre_lm_head = _get_lm_head(model)
 
     # Split fused QKV, apply permutation, pad if needed; register as submodules.
     model._spyre_q_projs = nn.ModuleList()

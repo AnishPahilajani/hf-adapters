@@ -222,7 +222,9 @@ def pytest_collection_modifyitems(config: Config, items: list[Item]) -> None:
             # Verify the device actually registered
             _ = torch.device("spyre")
         except RuntimeError as e:
-            skip_reason = f"torch_spyre imported but the 'spyre' device failed to register: {e!r}"
+            skip_reason = (
+                f"torch_spyre imported but the 'spyre' device failed to register: {e!r}"
+            )
 
     if skip_reason:
         skip_spyre = pytest.mark.skip(reason=skip_reason)

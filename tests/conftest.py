@@ -205,20 +205,27 @@ def pytest_generate_tests(metafunc: Metafunc) -> None:
 
 def pytest_collection_modifyitems(config: Config, items: list[Item]) -> None:
     """Skip spyre tests if torch_spyre is not installed / device unavailable; skip slow tests unless --run-slow."""
+    skip_reason = None
     try:
         import torch
         import torch_spyre  # noqa: F401 — side effect: registers "spyre" device
-
-        # Verify the device actually registered
-        _ = torch.device("spyre")
-        spyre_available = True
-    except (ImportError, RuntimeError):
-        spyre_available = False
-
-    if not spyre_available:
-        skip_spyre = pytest.mark.skip(
-            reason="torch_spyre not installed or spyre device unavailable"
+    except ImportError as e:
+        skip_reason = (
+            f"import torch_spyre failed under {sys.executable}: {e!r}. "
+            "Install it with `uv sync --group spyre`, and if you use a "
+            "separately-activated venv, check it's the one uv actually runs "
+            "(uv ignores an active VIRTUAL_ENV that doesn't match the project "
+            "environment)."
         )
+    else:
+        try:
+            # Verify the device actually registered
+            _ = torch.device("spyre")
+        except RuntimeError as e:
+            skip_reason = f"torch_spyre imported but the 'spyre' device failed to register: {e!r}"
+
+    if skip_reason:
+        skip_spyre = pytest.mark.skip(reason=skip_reason)
         for item in items:
             if "spyre" in item.nodeid or item.get_closest_marker("requires_spyre"):
                 item.add_marker(skip_spyre)

@@ -27,12 +27,25 @@ from huggingface_hub import HfApi
 from huggingface_hub.hf_api import ModelInfo
 
 from utils.hf_model_catalog import (
+    CURATED_EMBEDDING_MODELS_FILE,
     EXPAND_FIELDS,
+    REASON_NO_CONFIG,
+    REASON_NO_LOADABLE_WEIGHTS,
+    REASON_NON_NATIVE_FORMAT,
+    REASON_NOT_AN_EMBEDDER,
+    REASON_NSFW,
+    REASON_REMOTE_CODE,
+    REASON_RERANKER,
     RESOURCES_DIR,
+    Gate,
     build_catalog,
     contains_remote_code,
+    diagnose,
+    has_config,
     has_loadable_weights,
-    is_baseline_keep,
+    is_native_format,
+    is_not_nsfw,
+    load_curated_model_ids,
     tags,
     with_transient_retry,
 )
@@ -145,31 +158,48 @@ def _fetch(api: HfApi, limit: int) -> list[ModelInfo]:
     return sorted(by_id.values(), key=lambda m: (m.downloads or 0), reverse=True)
 
 
-def keep(model: ModelInfo, token: str | bool) -> bool:
-    """Keep predicate for the embedding fetcher.
+# Ordered gates for the embedding fetcher. THE ORDER IS LOAD-BEARING — see the
+# equivalent note in fetch_top_generative_models.py. The two embedding-specific
+# gates sit in the cheap block (both answer from tags/library_name/id alone),
+# ahead of the two networked gates.
+#
+# REASON_NOT_AN_EMBEDDER is by far the largest bucket here (~32% of candidates,
+# measured). It is a genuinely mixed set: real text embedders that simply lack a
+# sentence-transformers signal (BAAI/bge-small-en, allenai/specter2_base) sit
+# alongside the audio/vision encoders that share the feature-extraction pipeline
+# tag (wav2vec2, encodec, clap) and placeholder repos. That mix is exactly why
+# these are now recorded instead of dropped — the bucket is worth auditing.
+EMBEDDING_GATES: tuple[Gate, ...] = (
+    (REASON_NO_CONFIG, lambda m, _t: has_config(m)),
+    (REASON_NON_NATIVE_FORMAT, lambda m, _t: is_native_format(m)),
+    (REASON_NSFW, lambda m, _t: is_not_nsfw(m)),
+    (REASON_NOT_AN_EMBEDDER, lambda m, _t: _has_embedding_signal(m)),
+    (REASON_RERANKER, lambda m, _t: not _is_reranker(m)),
+    # --- everything below costs one network call per candidate ---
+    (REASON_REMOTE_CODE, lambda m, t: not contains_remote_code(m, t)),
+    (REASON_NO_LOADABLE_WEIGHTS, lambda m, t: has_loadable_weights(m, t)),
+)
 
-    Ordering matters: the cheap metadata-only checks run first so we only
-    spend the ``has_loadable_weights`` HTTP call on the ~1k candidates that
-    would otherwise survive.
+
+def keep(model: ModelInfo, token: str | bool) -> bool:
+    """True if *model* passes every gate. Thin shim over diagnose().
+
+    Retained so callers that only want a bool verdict keep working; the
+    fetchers themselves use diagnose() directly so they can record the cause.
     """
-    if not is_baseline_keep(model):
-        return False
-    if not _has_embedding_signal(model):
-        return False
-    if _is_reranker(model):
-        return False
-    if model.gated:
-        return False
-    if contains_remote_code(model):
-        return False
-    if not has_loadable_weights(model, token):
-        return False
-    return True
+    return diagnose(model, EMBEDDING_GATES, token) is None
 
 
 def fetch_top_embedding_models(
-    limit: int, output_csv: Path | str | None = None
+    limit: int,
+    output_csv: Path | str | None = None,
+    curated_file: Path | None = CURATED_EMBEDDING_MODELS_FILE,
 ) -> list[dict[str, object]]:
+    """Fetch the top-*limit* embedding models plus the curated list.
+
+    *curated_file* defaults to the maintained resource list; pass None to skip
+    it (used by tests, and by any caller that wants the pure Hub ranking).
+    """
     # Falls back to False (explicit anonymous access), not True: in
     # huggingface_hub, token=True means "use the locally cached login token,
     # and raise LocalTokenNotFoundError if none exists" — it does NOT mean
@@ -179,15 +209,20 @@ def fetch_top_embedding_models(
     # doesn't exist, which `.get(..., True)` alone would not catch.
     token: str | bool = os.environ.get("HF_TOKEN") or False
     api: HfApi = HfApi(token=token)
+    curated_ids: list[str] = (
+        load_curated_model_ids(curated_file) if curated_file else []
+    )
     return build_catalog(
         fetch_fn=lambda lim: _fetch(api, lim),
-        filter_fn=lambda m: keep(m, token),
+        gates=EMBEDDING_GATES,
         limit=limit,
         output_csv=output_csv,
         label="embedding",
         extra_columns=[("is_multimodal", _is_multimodal)],
         allow_millions=True,
         token=token,
+        curated_ids=curated_ids,
+        api=api,
     )
 
 

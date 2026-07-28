@@ -17,6 +17,12 @@ Additional flags:
 * ``--model-list-file F`` Load the model list from this JSON file (as produced by
   ``.github/scripts/generate_weekly_shards.py``) instead of fetching it. Used by the
   sharded CI workflow, where the top-K list is fetched once and split across parallel jobs.
+
+A row may arrive already carrying a ``rejection_reason`` — the fetcher's gates
+rejected it (audio encoder, adapter-only repo, requires trust_remote_code, ...)
+rather than dropping it silently. Those rows are recorded straight to the sink
+with the reason as their ``failure_category`` and never reach a worker; see
+``classify_early_skip``.
 """
 
 import argparse
@@ -29,6 +35,7 @@ import sys
 import time
 import traceback as _traceback
 from asyncio import Queue
+from collections import Counter
 from datetime import date
 from pathlib import Path
 
@@ -56,6 +63,15 @@ FAILURE_CATEGORY_VERIFICATION_FAILED = "verification_failed"
 FAILURE_CATEGORY_WORKER_CRASHED = "worker_crashed"
 FAILURE_CATEGORY_WORKER_TIMEOUT = "worker_timeout"
 FAILURE_CATEGORY_MOE = "moe"
+
+# Failure categories that are fully self-describing on their own, so the row's
+# free-text `error` column adds nothing. Rows rejected at fetch time also
+# qualify — their category IS the explanation — but they are written in the
+# parent with error=None and never reach the worker path that consults this.
+_SELF_DESCRIBING_CATEGORIES: tuple[str, ...] = (
+    FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER,
+    FAILURE_CATEGORY_MODEL_TOO_LARGE,
+)
 
 # Hard wall-clock cap for a single worker process (in seconds). If a batch
 # takes longer than this, the parent kills the child, marks the entire batch
@@ -477,10 +493,7 @@ def _process_batch(
         except Exception as e:
             # Skip the error/traceback for shallow failure categories where the
             # failure_category itself is fully self-describing.
-            if rec["failure_category"] not in (
-                FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER,
-                FAILURE_CATEGORY_MODEL_TOO_LARGE,
-            ):
+            if rec["failure_category"] not in _SELF_DESCRIBING_CATEGORIES:
                 rec["error"] = (
                     f"{type(e).__name__}: {e}\n"
                     f"{''.join(_traceback.format_exc().splitlines(keepends=True)[-6:])}"
@@ -608,6 +621,61 @@ def _chunk_into_batches(rows: list[dict], batch_size: int) -> list[list[dict]]:
     return [rows[i : i + batch_size] for i in range(0, len(rows), batch_size)]
 
 
+def classify_early_skip(row: dict) -> tuple[str | None, str]:
+    """Decide whether *row* can be settled without spawning a worker.
+
+    Returns ``(failure_category, log_suffix)``, or ``(None, "")`` when the model
+    must actually be evaluated. Every branch here reaches the same terminal
+    verdict a worker would, but without paying for a child process, a weights
+    download, or Spyre time.
+
+    THE ORDER IS THE REASON THIS IS ONE FUNCTION. The checks are not
+    independent — a more specific cause has to win over a more generic one, and
+    getting that backwards writes a wrong, and terminal (10-day), row:
+
+    1. ``rejection_reason`` — set by the fetcher's gates. Must come first.
+       Rejected rows never had their config class resolved (build_catalog skips
+       that enrichment for them), so the is_supported check below would happily
+       claim them and report "no adapter" for a model whose real problem was
+       that it is an audio encoder, or an adapter-only repo.
+    2. ``is_supported`` — only trusted when a config class was actually
+       resolved. is_supported is tri-state: None means "not determined", which
+       for a GATED repo is the normal outcome, because get_config_type()'s bare
+       `except` swallows GatedRepoError and returns None. Treating that as "no
+       adapter" would write not-implemented-adapter for every gated model.
+       resolve_adapter_module() re-reads the config on the pod, which has the
+       token and the license acceptances, so the pod — not the ubuntu-latest
+       job that built the shard — makes that call.
+    3. ``parameters`` over the Spyre ceiling.
+    4. ``is_moe`` — unsupported on Spyre, precomputed at fetch time so it
+       survives the shard's JSON round-trip.
+    """
+    rejection_reason = row.get("rejection_reason")
+    if rejection_reason:
+        return str(rejection_reason), f"rejected at fetch time ({rejection_reason})"
+
+    # `is False` (not falsy) is deliberate: None means undetermined, and the
+    # extra config_class check keeps this correct even for a stale shard written
+    # by a fetcher that predates the tri-state.
+    if row.get("is_supported") is False and row.get("config_class"):
+        return (
+            FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER,
+            f"no adapter for config_class={row.get('config_class')!r}",
+        )
+
+    params = row.get("parameters")
+    if params not in (None, "") and int(params) > MAX_NUMBER_PARAMS:
+        return (
+            FAILURE_CATEGORY_MODEL_TOO_LARGE,
+            f"{int(params):,} parameters exceeds the {MAX_NUMBER_PARAMS:,} limit",
+        )
+
+    if row.get("is_moe"):
+        return FAILURE_CATEGORY_MOE, "MoE model"
+
+    return None, ""
+
+
 def main(
     mode: EmbeddingGenerativeMode,
     write_to_csv: Path | str | None,
@@ -660,9 +728,11 @@ def main(
     # batching. That keeps batch sizes uniform relative to real work.
     prefiltered: list[dict] = []
     early_skipped: int = 0
-    moe_skipped: int = 0
-    too_large_skipped: int = 0
-    unsupported_skipped: int = 0
+    # Terminal-verdict rows settled here rather than in a worker, counted by
+    # failure_category. Replaces the former per-reason counters: the set of
+    # reasons is now open-ended (every fetcher gate contributes one), so a
+    # Counter beats one named int per cause.
+    skipped_by_category: Counter[str] = Counter()
     print(f"{ts()} Will process {len(to_process_list)} models in total.")
     for row in to_process_list:
         model_path = str(row["model_id"])
@@ -674,13 +744,13 @@ def main(
                 f"{sink.__class__.__name__} skip window"
             )
             continue
-        # No adapter registered for this model's config class — same terminal
-        # decision resolve_adapter_module_for_test would reach in the worker,
-        # but reached here without spawning one. Uses the fetcher-computed
-        # is_supported flag (True iff config_class is in the adapter mapping).
 
-        if row.get("is_supported") is False:
-            unsupported_skipped += 1
+        # One terminal-verdict gate for all causes; see classify_early_skip for
+        # why their relative order matters. Reaching the same conclusion a
+        # worker would, without spawning one or downloading weights.
+        failure_category, log_suffix = classify_early_skip(row)
+        if failure_category is not None:
+            skipped_by_category[failure_category] += 1
             sink.add_entry(
                 model_name=model_path,
                 config_class=str(row.get("config_class") or ""),
@@ -694,68 +764,10 @@ def main(
                 family=str(row.get("model_type") or ""),
                 architecture=str(row.get("architectures") or ""),
                 parameters_number=int(row.get("parameters") or 0),
-                failure_category=FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER,
+                failure_category=failure_category,
                 error=None,
             )
-            print(
-                f"{ts()}     sink: '{model_path}' skipped early — "
-                f"no adapter for config_class={row.get('config_class')!r}"
-            )
-            continue
-        # Reject models too large to bring up on Spyre BEFORE spawning a
-        # worker. Same intent as the in-worker guard in _process_batch, but
-        # catches everything the fetcher already sized so no worker time is
-        # wasted. _process_batch keeps its own check as a defensive backstop
-        # for rows where parameters were unknown at fetch time.
-        params = row.get("parameters")
-        if params not in (None, "") and int(params) > MAX_NUMBER_PARAMS:
-            too_large_skipped += 1
-            sink.add_entry(
-                model_name=model_path,
-                config_class=str(row.get("config_class") or ""),
-                adapter_name="",
-                added_date=None,
-                snapshot_date=snapshot_date,
-                verified_on_cpu=False,
-                verified_on_gpu=False,
-                verified_on_spyre=False,
-                num_downloads=int(row.get("downloads") or 0),
-                family=str(row.get("model_type") or ""),
-                architecture=str(row.get("architectures") or ""),
-                parameters_number=int(params),
-                failure_category=FAILURE_CATEGORY_MODEL_TOO_LARGE,
-                error=None,
-            )
-            print(
-                f"{ts()}     sink: '{model_path}' skipped early — "
-                f"{int(params):,} parameters exceeds the "
-                f"{MAX_NUMBER_PARAMS:,} limit"
-            )
-            continue
-        # MoE models aren't supported on Spyre yet — write the row up-front
-        # with failure_category=moe and don't send it to the workers.
-        # is_moe is precomputed at fetch time (utils/hf_model_catalog.py) so
-        # it survives a JSON round-trip through --model-list-file, unlike the
-        # raw (non-serializable) model_info object.
-        if row.get("is_moe"):
-            moe_skipped += 1
-            sink.add_entry(
-                model_name=model_path,
-                config_class=str(row.get("config_class") or ""),
-                adapter_name="",
-                added_date=None,
-                snapshot_date=snapshot_date,
-                verified_on_cpu=False,
-                verified_on_gpu=False,
-                verified_on_spyre=False,
-                num_downloads=int(row.get("downloads") or 0),
-                family=str(row.get("model_type") or ""),
-                architecture=str(row.get("architectures") or ""),
-                parameters_number=int(row.get("parameters") or 0),
-                failure_category=FAILURE_CATEGORY_MOE,
-                error=None,
-            )
-            print(f"{ts()}     sink: '{model_path}' skipped early — MoE model")
+            print(f"{ts()}     sink: '{model_path}' skipped early — {log_suffix}")
             continue
         prefiltered.append(row)
     if early_skipped:
@@ -763,23 +775,15 @@ def main(
             f"\n{ts()} Early-skip: {early_skipped}/{total} models already have a "
             f"recent snapshot; {len(prefiltered)} left to evaluate.\n"
         )
-    if unsupported_skipped:
+    if skipped_by_category:
+        settled: int = sum(skipped_by_category.values())
         print(
-            f"{ts()} Unsupported-skip: {unsupported_skipped}/{total} models have "
-            f"no adapter for their config_class and were written directly to the "
-            f"sink.\n"
+            f"{ts()} Settled without a worker: {settled}/{total} models were "
+            f"written directly to the sink with a terminal failure_category:"
         )
-    if too_large_skipped:
-        print(
-            f"{ts()} Too-large-skip: {too_large_skipped}/{total} models exceed "
-            f"the {MAX_NUMBER_PARAMS:,} parameter limit and were written directly "
-            f"to the sink.\n"
-        )
-    if moe_skipped:
-        print(
-            f"{ts()} MoE-skip: {moe_skipped}/{total} models tagged as moe and "
-            f"written directly to the sink.\n"
-        )
+        for category, count in skipped_by_category.most_common():
+            print(f"{ts()}     {category}: {count}")
+        print()
 
     batches: list[list[dict]] = _chunk_into_batches(
         prefiltered, number_of_model_per_process

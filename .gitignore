@@ -245,3 +245,7 @@ config.local.*
 .claude/commands/
 .bob/
 # Made with Bob
+
+# Shard JSON written by .github/scripts/generate_weekly_shards.py (build output;
+# uploaded as a CI artifact, regenerated on every run).
+shards/

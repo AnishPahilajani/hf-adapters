@@ -119,46 +119,13 @@ jobs:
           pip install -e .
           pip install huggingface_hub tqdm transformers
 
-      # TEMPORARY debug step: confirms HF_TOKEN actually reaches this job as a
-      # working credential, and re-runs the real keep()-filter checks against
-      # one known-public model WITHOUT swallowing exceptions, since
-      # has_loadable_weights()/contains_remote_code() both catch everything
-      # and return a plain bool by design. Never prints the token itself.
-      # Remove once the 0-kept-models issue is root-caused.
-      - name: Verify HF Hub authentication
-        run: |
-          python -m pip freeze | grep -iE "^(huggingface-hub|transformers)==" || true
-          python - <<'PY'
-          import os
-          from huggingface_hub import HfApi
-          from transformers import AutoConfig
-
-          tok = os.environ.get("HF_TOKEN") or ""
-          print(f"HF_TOKEN: {'set (' + str(len(tok)) + ' chars)' if tok else 'NOT SET / empty'}")
-          token = tok or False
-
-          try:
-              info = HfApi(token=token).whoami()
-              print(f"whoami() OK: {info.get('name', info)!r}")
-          except Exception as e:
-              print(f"whoami() FAILED: {type(e).__name__}: {e}")
-
-          probe_id = "openai-community/gpt2"
-          print(f"\n--- probing keep()-equivalent checks against {probe_id!r} ---")
-
-          try:
-              files = HfApi(token=token).list_repo_files(probe_id, token=token)
-              print(f"list_repo_files() OK: {len(files)} files, e.g. {files[:5]}")
-          except Exception as e:
-              print(f"list_repo_files() FAILED: {type(e).__name__}: {e}")
-
-          try:
-              cfg = AutoConfig.from_pretrained(probe_id, trust_remote_code=False)
-              print(f"AutoConfig.from_pretrained() OK: {type(cfg).__name__}")
-          except Exception as e:
-              print(f"AutoConfig.from_pretrained() FAILED: {type(e).__name__}: {e}")
-          PY
-
+      # The former "Verify HF Hub authentication" debug step lived here. It
+      # existed to catch the failure mode where every candidate was filtered
+      # out (bad token, unwritable HF_HOME) with no trace in the output. That
+      # is now diagnosed permanently and in-band: the fetcher records each
+      # rejected model with the gate that rejected it, and prints a per-cause
+      # histogram, so an environment-wide breakage shows up as a single cause
+      # accounting for ~100% of candidates instead of a silently empty scan.
       - name: Generate shards
         id: generate
         run: |
@@ -185,7 +152,7 @@ jobs:
           retention-days: 1
 
   weekly-model-scan:
-    name: Weekly model scan (${{ matrix.mode }} shard ${{ matrix.shard_index }})
+    name: Weekly model scan (${{ matrix.mode }} ${{ matrix.kind }} shard ${{ matrix.shard_index }})
     needs: generate-matrix
     runs-on:
       - x86_64
@@ -253,7 +220,10 @@ jobs:
           print("ClickHouse connectivity check: OK")
           PY
 
-      - name: Run weekly ${{ matrix.mode }} model scan (shard ${{ matrix.shard_index }})
+      # A "rejected" shard spawns no workers: every row was rejected by the
+      # fetcher's gates and is written straight to ClickHouse with its
+      # rejection reason as failure_category. Those jobs finish in seconds.
+      - name: Run weekly ${{ matrix.mode }} model scan (${{ matrix.kind }} shard ${{ matrix.shard_index }})
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
@@ -261,4 +231,4 @@ jobs:
           uv run python tests/spyre/weekly_generation/weekly_test.py \
             --mode ${{ matrix.mode }} \
             --model-list-file shards/${{ matrix.shard_file }}
-          echo "weekly ${{ matrix.mode }} shard ${{ matrix.shard_index }} scan done"
+          echo "weekly ${{ matrix.mode }} ${{ matrix.kind }} shard ${{ matrix.shard_index }} scan done"

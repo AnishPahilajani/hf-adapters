@@ -226,7 +226,7 @@ def main() -> None:
         default="all",
         help="Restrict the scan to one mode (e.g. 'embedding' for a quick, "
         "low-resource manual run). 'all' (the default, and what the "
-        "scheduled run always uses) fetches/shards both modes.",
+        "scheduled run always uses) fetches/shards both model-types.",
     )
     args = parser.parse_args()
 
@@ -244,7 +244,7 @@ def main() -> None:
         model_types=model_types,
     )
 
-    print(f"\nTotal shards across both modes: {len(matrix)}")
+    print(f"\nTotal shards across both model-types: {len(matrix)}")
 
     # Split by runner tier so push-to-clickhouse.yaml's three per-tier jobs
     # can each cap strategy.max-parallel in cards (x1=1, x2=2, x4=4/shard).

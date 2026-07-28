@@ -245,7 +245,20 @@ def main() -> None:
     )
 
     print(f"\nTotal shards across both modes: {len(matrix)}")
-    write_github_output({"matrix": json.dumps(matrix)})
+
+    # Split by runner tier so push-to-clickhouse.yaml's three per-tier jobs
+    # can each cap strategy.max-parallel in cards (x1=1, x2=2, x4=4/shard).
+    matrix_by_tier: dict[str, list[dict]] = {"x1": [], "x2": [], "x4": []}
+    for item in matrix:
+        matrix_by_tier[item["runner"]].append(item)
+
+    write_github_output(
+        {
+            "matrix_x1": json.dumps(matrix_by_tier["x1"]),
+            "matrix_x2": json.dumps(matrix_by_tier["x2"]),
+            "matrix_x4": json.dumps(matrix_by_tier["x4"]),
+        }
+    )
 
 
 if __name__ == "__main__":

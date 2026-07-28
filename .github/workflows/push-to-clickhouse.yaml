@@ -90,7 +90,9 @@ jobs:
       run:
         working-directory: .
     outputs:
-      matrix: ${{ steps.generate.outputs.matrix }}
+      matrix_x1: ${{ steps.generate.outputs.matrix_x1 }}
+      matrix_x2: ${{ steps.generate.outputs.matrix_x2 }}
+      matrix_x4: ${{ steps.generate.outputs.matrix_x4 }}
     env:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       # Overrides the workflow-level HF_HOME (/storage-1/... — a Spyre-pod-only
@@ -178,20 +180,18 @@ jobs:
           path: shards/
           retention-days: 1
 
-  weekly-model-scan:
-    name: Weekly model scan (${{ matrix.mode }} ${{ matrix.runner }} shard ${{ matrix.shard_index }})
+  # Split by runner tier so max-parallel caps total cards held at once:
+  # 10*1 + 4*2 + 1*4 = 22 cards (~2 nodes), so PR/daily CI isn't starved.
+  weekly-model-scan-x1:
+    name: Weekly model scan x1 (${{ matrix.mode }} shard ${{ matrix.shard_index }})
     needs: generate-matrix
-    # matrix.runner is "x1"/"x2"/"x4" (generate_weekly_shards.py routes models
-    # by parameter count: bigger models get more memory + more cards). All
-    # three labels must be in .github/actionlint.yaml.
-    runs-on: ${{ fromJSON(format('["x86_64","{0}","linux","image_torch_spyre_pinned"]', matrix.runner == 'x4' && 'spyre_pf_x4' || matrix.runner == 'x2' && 'spyre_pf_x2' || 'spyre_pf_x1')) }}
-    # A shard can still run for a while depending on its size; the cadence is
-    # weekly so a generous ceiling is safe.
+    runs-on: [x86_64, spyre_pf_x1, linux, image_torch_spyre]
     timeout-minutes: 4320
     strategy:
       fail-fast: false
+      max-parallel: 10 # 10 shards x 1 card = 10 cards
       matrix:
-        include: ${{ fromJSON(needs.generate-matrix.outputs.matrix) }}
+        include: ${{ fromJSON(needs.generate-matrix.outputs.matrix_x1) }}
     env:
       CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST }}
       CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT }}
@@ -220,9 +220,162 @@ jobs:
           name: weekly-shards
           path: shards
 
-      # Sanity check: fail fast (before burning hours of Spyre time on the
-      # scan below) if the CLICKHOUSE_* secrets are missing or wrong. Never
-      # prints secret values, only presence/length and a live SELECT 1.
+      # Fail fast if ClickHouse secrets are missing/wrong. Never prints
+      # secret values, only presence/length and a live SELECT 1.
+      - name: Verify ClickHouse connection
+        run: |
+          for VAR in CLICKHOUSE_HOST CLICKHOUSE_PORT CLICKHOUSE_USER CLICKHOUSE_PASS CLICKHOUSE_DB; do
+            VAL="${!VAR}"
+            if [[ -n "$VAL" ]]; then
+              echo "$VAR: set (${#VAL} chars)"
+            else
+              echo "$VAR: NOT SET"
+            fi
+          done
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          uv run python - <<'PY'
+          import os
+          import clickhouse_connect
+
+          client = clickhouse_connect.get_client(
+              host=os.environ["CLICKHOUSE_HOST"],
+              port=int(os.environ.get("CLICKHOUSE_PORT", 443)),
+              user=os.environ.get("CLICKHOUSE_USER", "default"),
+              password=os.environ["CLICKHOUSE_PASS"],
+              database=os.environ.get("CLICKHOUSE_DB", "spyre"),
+              secure=True,
+          )
+          client.command("SELECT 1")
+          print("ClickHouse connectivity check: OK")
+          PY
+
+      - name: Run weekly ${{ matrix.mode }} model scan (shard ${{ matrix.shard_index }})
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          uv run python tests/spyre/weekly_generation/weekly_test.py \
+            --mode ${{ matrix.mode }} \
+            --model-list-file shards/${{ matrix.shard_file }}
+          echo "weekly ${{ matrix.mode }} shard ${{ matrix.shard_index }} scan done"
+
+  weekly-model-scan-x2:
+    name: Weekly model scan x2 (${{ matrix.mode }} shard ${{ matrix.shard_index }})
+    needs: generate-matrix
+    runs-on: [x86_64, spyre_pf_x2, linux, image_torch_spyre]
+    timeout-minutes: 4320
+    strategy:
+      fail-fast: false
+      max-parallel: 4 # 4 shards x 2 cards = 8 cards
+      matrix:
+        include: ${{ fromJSON(needs.generate-matrix.outputs.matrix_x2) }}
+    env:
+      CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST }}
+      CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT }}
+      CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
+      CLICKHOUSE_PASS: ${{ secrets.CLICKHOUSE_PASS }}
+      CLICKHOUSE_DB: ${{ secrets.CLICKHOUSE_DB }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/gather-runner-info
+        with:
+          verbose: 'true'
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test models-ops"
+
+      - name: Download shard
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: weekly-shards
+          path: shards
+
+      # Fail fast if ClickHouse secrets are missing/wrong. Never prints
+      # secret values, only presence/length and a live SELECT 1.
+      - name: Verify ClickHouse connection
+        run: |
+          for VAR in CLICKHOUSE_HOST CLICKHOUSE_PORT CLICKHOUSE_USER CLICKHOUSE_PASS CLICKHOUSE_DB; do
+            VAL="${!VAR}"
+            if [[ -n "$VAL" ]]; then
+              echo "$VAR: set (${#VAL} chars)"
+            else
+              echo "$VAR: NOT SET"
+            fi
+          done
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          uv run python - <<'PY'
+          import os
+          import clickhouse_connect
+
+          client = clickhouse_connect.get_client(
+              host=os.environ["CLICKHOUSE_HOST"],
+              port=int(os.environ.get("CLICKHOUSE_PORT", 443)),
+              user=os.environ.get("CLICKHOUSE_USER", "default"),
+              password=os.environ["CLICKHOUSE_PASS"],
+              database=os.environ.get("CLICKHOUSE_DB", "spyre"),
+              secure=True,
+          )
+          client.command("SELECT 1")
+          print("ClickHouse connectivity check: OK")
+          PY
+
+      - name: Run weekly ${{ matrix.mode }} model scan (shard ${{ matrix.shard_index }})
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          uv run python tests/spyre/weekly_generation/weekly_test.py \
+            --mode ${{ matrix.mode }} \
+            --model-list-file shards/${{ matrix.shard_file }}
+          echo "weekly ${{ matrix.mode }} shard ${{ matrix.shard_index }} scan done"
+
+  weekly-model-scan-x4:
+    name: Weekly model scan x4 (${{ matrix.mode }} shard ${{ matrix.shard_index }})
+    needs: generate-matrix
+    runs-on: [x86_64, spyre_pf_x4, linux, image_torch_spyre]
+    timeout-minutes: 4320
+    strategy:
+      fail-fast: false
+      max-parallel: 1 # 1 shard x 4 cards = 4 cards
+      matrix:
+        include: ${{ fromJSON(needs.generate-matrix.outputs.matrix_x4) }}
+    env:
+      CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST }}
+      CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT }}
+      CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
+      CLICKHOUSE_PASS: ${{ secrets.CLICKHOUSE_PASS }}
+      CLICKHOUSE_DB: ${{ secrets.CLICKHOUSE_DB }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/gather-runner-info
+        with:
+          verbose: 'true'
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test models-ops"
+
+      - name: Download shard
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: weekly-shards
+          path: shards
+
+      # Fail fast if ClickHouse secrets are missing/wrong. Never prints
+      # secret values, only presence/length and a live SELECT 1.
       - name: Verify ClickHouse connection
         run: |
           for VAR in CLICKHOUSE_HOST CLICKHOUSE_PORT CLICKHOUSE_USER CLICKHOUSE_PASS CLICKHOUSE_DB; do

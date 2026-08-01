@@ -1,9 +1,9 @@
 name: test_pull_request
 
 on:
-  push:
-    branches: [main]
-    tags: ["*"]
+  # push:
+  #   branches: [main]
+  #   tags: ["*"]
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened]

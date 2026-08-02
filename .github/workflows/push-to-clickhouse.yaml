@@ -1,0 +1,414 @@
+# =============================================================================
+# Weekly Spyre model-support scan -> ClickHouse
+#
+# Runs the top-K HuggingFace Hub generative and embedding models through the
+# CPU-load -> Spyre-verify pipeline (tests/spyre/weekly_generation/weekly_test.py)
+# and records the outcome directly in ClickHouse (see result_sink.py), replacing
+# the manual dev-instance upload + periodic dev->prod migration.
+#
+# Unlike torch-spyre's push-to-clickhouse.yaml, this is not a post-hoc ingest
+# of a separate test run's artifact: weekly_test.py's skip-window dedup guard
+# (don't re-test a model verified in the last 10 days) needs to read
+# ClickHouse live during the scan, so fetch + test + push both happen in the
+# weekly-model-scan job below rather than being split across a test workflow
+# and a separate ingest one.
+#
+# At top_k=10000 per mode, a single job processing the whole list serially
+# would take far too long, so the fetch itself IS split out: generate-matrix
+# fetches the top-K list once (no Spyre hardware needed), shards it, and
+# weekly-model-scan fans out over those shards in parallel (mirrors
+# torch-spyre's generate_matrix -> matrix job pattern).
+# =============================================================================
+name: push-to-clickhouse
+
+on:
+  schedule:
+    # Saturday 22:00 UTC
+    - cron: "0 22 * * 6"
+  workflow_dispatch:
+    inputs:
+      top_k:
+        description: Number of top models to fetch (by downloads)
+        required: false
+        type: string
+        default: "10000"
+      model_type:
+        description: >-
+          Model type to scan (manual runs only — the scheduled run always
+          scans all)
+        required: false
+        type: choice
+        options:
+          - all
+          - generative
+          - embedding
+        default: all
+
+concurrency:
+  # Scoped per-ref: a new commit on a given branch cancels and supersedes
+  # whatever's still running for that SAME branch, without touching a run
+  # in progress on a different ref (e.g. a PR-branch test push won't cancel
+  # the real production scan running against main).
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+    working-directory: /home/senuser
+
+env:
+  # See test_daily.yaml for why CI must be blanked out here.
+  CI: ""
+  CLONED_HF_ADAPTERS_DIR: ${{ github.workspace }}
+  STORAGE_1_DIR: /storage-1/hf-adapters
+  HF_HOME: /storage-1/hf-adapters/.cache/huggingface
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Fetch the top-K list once per mode and shard it for the parallel matrix
+  # job below. No Spyre hardware needed — utils/hf_model_catalog.py's import
+  # chain (via hf_adapters/auto_spyre_model.py) has no module-level
+  # torch_spyre dependency; it's lazily imported inside a device-guarded
+  # function body in hf_common.py. The now-deprecated test_weekly_DEPRECATED
+  # .yaml is existing proof this exact fetch path runs fine on ubuntu-latest.
+  # ---------------------------------------------------------------------------
+  generate-matrix:
+    name: Generate weekly shards
+    runs-on: ubuntu-latest
+    # At top_k=10000+, fetching 2x oversampled raw candidates per mode (each
+    # requiring a has_loadable_weights/contains_remote_code network call) is
+    # genuinely slow — 30 min wasn't enough and the job was cancelled mid-run.
+    timeout-minutes: 120
+    # Overrides the workflow-level default of /home/senuser (test_daily.yaml's
+    # own generate-matrix job does the same) — that path only exists on the
+    # Spyre-pod runner image, not on ubuntu-latest.
+    defaults:
+      run:
+        working-directory: .
+    outputs:
+      matrix_x1: ${{ steps.generate.outputs.matrix_x1 }}
+      matrix_x2: ${{ steps.generate.outputs.matrix_x2 }}
+      matrix_x4: ${{ steps.generate.outputs.matrix_x4 }}
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      # Overrides the workflow-level HF_HOME (/storage-1/... — a Spyre-pod-only
+      # mount). Every AutoConfig.from_pretrained() call was failing with a
+      # PermissionError trying to write there, which contains_remote_code()
+      # silently caught and treated as "yes, remote code" — filtering out
+      # every single model regardless of top_k.
+      HF_HOME: ${{ github.workspace }}/.cache/huggingface
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install huggingface_hub tqdm transformers
+
+      # TEMPORARY debug step: confirms HF_TOKEN actually reaches this job as a
+      # working credential, and re-runs the real keep()-filter checks against
+      # one known-public model WITHOUT swallowing exceptions, since
+      # has_loadable_weights()/contains_remote_code() both catch everything
+      # and return a plain bool by design. Never prints the token itself.
+      # Remove once the 0-kept-models issue is root-caused.
+      - name: Verify HF Hub authentication
+        run: |
+          python -m pip freeze | grep -iE "^(huggingface-hub|transformers)==" || true
+          python - <<'PY'
+          import os
+          from huggingface_hub import HfApi
+          from transformers import AutoConfig
+
+          tok = os.environ.get("HF_TOKEN") or ""
+          print(f"HF_TOKEN: {'set (' + str(len(tok)) + ' chars)' if tok else 'NOT SET / empty'}")
+          token = tok or False
+
+          try:
+              info = HfApi(token=token).whoami()
+              print(f"whoami() OK: {info.get('name', info)!r}")
+          except Exception as e:
+              print(f"whoami() FAILED: {type(e).__name__}: {e}")
+
+          probe_id = "openai-community/gpt2"
+          print(f"\n--- probing keep()-equivalent checks against {probe_id!r} ---")
+
+          try:
+              files = HfApi(token=token).list_repo_files(probe_id, token=token)
+              print(f"list_repo_files() OK: {len(files)} files, e.g. {files[:5]}")
+          except Exception as e:
+              print(f"list_repo_files() FAILED: {type(e).__name__}: {e}")
+
+          try:
+              cfg = AutoConfig.from_pretrained(probe_id, trust_remote_code=False)
+              print(f"AutoConfig.from_pretrained() OK: {type(cfg).__name__}")
+          except Exception as e:
+              print(f"AutoConfig.from_pretrained() FAILED: {type(e).__name__}: {e}")
+          PY
+
+      - name: Generate shards
+        id: generate
+        run: |
+          # '10000' / 'all' are the fallbacks for schedule-triggered runs,
+          # since the `inputs` context is only populated for
+          # workflow_dispatch (the input schema's defaults above only apply
+          # to the manual "Run workflow" form). The scheduled run must always
+          # scan 'all' regardless of what a prior manual dispatch selected.
+          #
+          # Shard sizes use the script's real defaults (250/500 for the
+          # x1 tier, 100/50 for the x2/x4 tiers by parameter count).
+          python .github/scripts/generate_weekly_shards.py \
+            --top-k ${{ inputs.top_k || '10000' }} \
+            --model-type ${{ github.event_name == 'workflow_dispatch' && (inputs.model_type || 'all') || 'all' }} \
+            --output-dir shards
+
+      - name: Upload shard artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: weekly-shards
+          path: shards/
+          retention-days: 1
+
+  # Split by runner tier so max-parallel caps total cards held at once:
+  # 10*1 + 4*2 + 1*4 = 22 cards (~2 nodes), so PR/daily CI isn't starved.
+  weekly-model-scan-x1:
+    name: Weekly model scan x1 (${{ matrix.mode }} shard ${{ matrix.shard_index }})
+    needs: generate-matrix
+    runs-on: [x86_64, spyre_pf_x1, linux, image_torch_spyre]
+    timeout-minutes: 4320
+    strategy:
+      fail-fast: false
+      max-parallel: 20 # 20 shards x 1 card = 20 cards
+      matrix:
+        include: ${{ fromJSON(needs.generate-matrix.outputs.matrix_x1) }}
+    env:
+      CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST }}
+      CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT }}
+      CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
+      CLICKHOUSE_PASS: ${{ secrets.CLICKHOUSE_PASS }}
+      CLICKHOUSE_DB: ${{ secrets.CLICKHOUSE_DB }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/gather-runner-info
+        with:
+          verbose: 'true'
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test models-ops"
+
+      - name: Download shard
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: weekly-shards
+          path: shards
+
+      # Fail fast if ClickHouse secrets are missing/wrong. Never prints
+      # secret values, only presence/length and a live SELECT 1.
+      - name: Verify ClickHouse connection
+        run: |
+          for VAR in CLICKHOUSE_HOST CLICKHOUSE_PORT CLICKHOUSE_USER CLICKHOUSE_PASS CLICKHOUSE_DB; do
+            VAL="${!VAR}"
+            if [[ -n "$VAL" ]]; then
+              echo "$VAR: set (${#VAL} chars)"
+            else
+              echo "$VAR: NOT SET"
+            fi
+          done
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          uv run python - <<'PY'
+          import os
+          import clickhouse_connect
+
+          client = clickhouse_connect.get_client(
+              host=os.environ["CLICKHOUSE_HOST"],
+              port=int(os.environ.get("CLICKHOUSE_PORT", 443)),
+              user=os.environ.get("CLICKHOUSE_USER", "default"),
+              password=os.environ["CLICKHOUSE_PASS"],
+              database=os.environ.get("CLICKHOUSE_DB", "spyre"),
+              secure=True,
+          )
+          client.command("SELECT 1")
+          print("ClickHouse connectivity check: OK")
+          PY
+
+      - name: Run weekly ${{ matrix.mode }} model scan (shard ${{ matrix.shard_index }})
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          uv run python tests/spyre/weekly_generation/weekly_test.py \
+            --mode ${{ matrix.mode }} \
+            --model-list-file shards/${{ matrix.shard_file }}
+          echo "weekly ${{ matrix.mode }} shard ${{ matrix.shard_index }} scan done"
+
+  weekly-model-scan-x2:
+    name: Weekly model scan x2 (${{ matrix.mode }} shard ${{ matrix.shard_index }})
+    needs: generate-matrix
+    runs-on: [x86_64, spyre_pf_x2, linux, image_torch_spyre]
+    timeout-minutes: 4320
+    strategy:
+      fail-fast: false
+      max-parallel: 4 # 4 shards x 2 cards = 8 cards
+      matrix:
+        include: ${{ fromJSON(needs.generate-matrix.outputs.matrix_x2) }}
+    env:
+      CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST }}
+      CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT }}
+      CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
+      CLICKHOUSE_PASS: ${{ secrets.CLICKHOUSE_PASS }}
+      CLICKHOUSE_DB: ${{ secrets.CLICKHOUSE_DB }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/gather-runner-info
+        with:
+          verbose: 'true'
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test models-ops"
+
+      - name: Download shard
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: weekly-shards
+          path: shards
+
+      # Fail fast if ClickHouse secrets are missing/wrong. Never prints
+      # secret values, only presence/length and a live SELECT 1.
+      - name: Verify ClickHouse connection
+        run: |
+          for VAR in CLICKHOUSE_HOST CLICKHOUSE_PORT CLICKHOUSE_USER CLICKHOUSE_PASS CLICKHOUSE_DB; do
+            VAL="${!VAR}"
+            if [[ -n "$VAL" ]]; then
+              echo "$VAR: set (${#VAL} chars)"
+            else
+              echo "$VAR: NOT SET"
+            fi
+          done
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          uv run python - <<'PY'
+          import os
+          import clickhouse_connect
+
+          client = clickhouse_connect.get_client(
+              host=os.environ["CLICKHOUSE_HOST"],
+              port=int(os.environ.get("CLICKHOUSE_PORT", 443)),
+              user=os.environ.get("CLICKHOUSE_USER", "default"),
+              password=os.environ["CLICKHOUSE_PASS"],
+              database=os.environ.get("CLICKHOUSE_DB", "spyre"),
+              secure=True,
+          )
+          client.command("SELECT 1")
+          print("ClickHouse connectivity check: OK")
+          PY
+
+      - name: Run weekly ${{ matrix.mode }} model scan (shard ${{ matrix.shard_index }})
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          uv run python tests/spyre/weekly_generation/weekly_test.py \
+            --mode ${{ matrix.mode }} \
+            --model-list-file shards/${{ matrix.shard_file }}
+          echo "weekly ${{ matrix.mode }} shard ${{ matrix.shard_index }} scan done"
+
+  weekly-model-scan-x4:
+    name: Weekly model scan x4 (${{ matrix.mode }} shard ${{ matrix.shard_index }})
+    needs: generate-matrix
+    runs-on: [x86_64, spyre_pf_x4, linux, image_torch_spyre]
+    timeout-minutes: 4320
+    strategy:
+      fail-fast: false
+      max-parallel: 1 # 1 shard x 4 cards = 4 cards
+      matrix:
+        include: ${{ fromJSON(needs.generate-matrix.outputs.matrix_x4) }}
+    env:
+      CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST }}
+      CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT }}
+      CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
+      CLICKHOUSE_PASS: ${{ secrets.CLICKHOUSE_PASS }}
+      CLICKHOUSE_DB: ${{ secrets.CLICKHOUSE_DB }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/gather-runner-info
+        with:
+          verbose: 'true'
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test models-ops"
+
+      - name: Download shard
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: weekly-shards
+          path: shards
+
+      # Fail fast if ClickHouse secrets are missing/wrong. Never prints
+      # secret values, only presence/length and a live SELECT 1.
+      - name: Verify ClickHouse connection
+        run: |
+          for VAR in CLICKHOUSE_HOST CLICKHOUSE_PORT CLICKHOUSE_USER CLICKHOUSE_PASS CLICKHOUSE_DB; do
+            VAL="${!VAR}"
+            if [[ -n "$VAL" ]]; then
+              echo "$VAR: set (${#VAL} chars)"
+            else
+              echo "$VAR: NOT SET"
+            fi
+          done
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          uv run python - <<'PY'
+          import os
+          import clickhouse_connect
+
+          client = clickhouse_connect.get_client(
+              host=os.environ["CLICKHOUSE_HOST"],
+              port=int(os.environ.get("CLICKHOUSE_PORT", 443)),
+              user=os.environ.get("CLICKHOUSE_USER", "default"),
+              password=os.environ["CLICKHOUSE_PASS"],
+              database=os.environ.get("CLICKHOUSE_DB", "spyre"),
+              secure=True,
+          )
+          client.command("SELECT 1")
+          print("ClickHouse connectivity check: OK")
+          PY
+
+      - name: Run weekly ${{ matrix.mode }} model scan (shard ${{ matrix.shard_index }})
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          uv run python tests/spyre/weekly_generation/weekly_test.py \
+            --mode ${{ matrix.mode }} \
+            --model-list-file shards/${{ matrix.shard_file }}
+          echo "weekly ${{ matrix.mode }} shard ${{ matrix.shard_index }} scan done"

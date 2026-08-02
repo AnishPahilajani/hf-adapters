@@ -4,10 +4,10 @@ version = "0.1.0"
 description = "Minimal runtime patches that make stock HuggingFace Transformers models run on Spyre accelerators"
 readme = "README.md"
 license = { file = "LICENSE.txt" }
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.15"
 dependencies = [
     "torch>=2.0",
-    "transformers>=5.12.1",
+    "transformers>=5.12.1,<6.0.0",
     "sentencepiece",
     "accelerate",
     "sentence_transformers",
@@ -97,7 +97,7 @@ models-ops = [
     "regex",
 ]
 test = [
-    "pytest",
+    "pytest>=9.0,<9.1",
     "Pillow",
-    "torchvision~=0.26.0",
+    "torchvision~=0.28.0",
 ]

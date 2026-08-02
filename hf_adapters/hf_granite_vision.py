@@ -42,11 +42,12 @@ import torch
 
 from hf_adapters.hf_common import (
     get_backbone,
+    make_standard_gqa_block,
     pad_lm_head,
     prepare_rope_and_heads,
     text_config,
 )
-from hf_adapters.hf_granite import _make_compiled_block, _run_backbone_forward
+from hf_adapters.hf_granite import _run_backbone_forward
 
 
 def load_hf_model(model_path, dtype=torch.float16):
@@ -84,7 +85,7 @@ def prepare_for_spyre(model):
     prepare_rope_and_heads(model)
     pad_lm_head(model)
     model._spyre_compiled_blocks = [
-        _make_compiled_block(layer) for layer in get_backbone(model).layers
+        make_standard_gqa_block(layer, True) for layer in get_backbone(model).layers
     ]
     model._spyre_compiled_norm = torch.compile(get_backbone(model).norm, dynamic=False)
 

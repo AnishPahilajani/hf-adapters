@@ -55,16 +55,14 @@ from _pytest.nodes import Item
 from _pytest.python import Metafunc
 from transformers import AutoModelForCausalLM, PretrainedConfig
 
-from hf_adapters.auto_spyre_model import (
-    CONFIG_TO_ADAPTER_MODULE_MAPPING,
-    resolve_adapter_module,
-)
-
 # NOTE: do NOT import hf_adapters at module top level. The CPU patch block below
 # rebuilds ``hf_adapters.hf_common`` with ``DEVICE='cpu'`` and asserts that no
 # import has materialized it yet; a top-level import here would always trip that
 # assert. ``MODEL_PATH_TO_TORCH_DTYPE`` / ``MODEL_PATH_WITH_LOAD_FN`` are pulled
 # in lazily inside the helpers that use them.
+# CONFIG_TO_ADAPTER_MODULE_MAPPING / resolve_adapter_module are imported lazily
+# below (after the CPU patch) so the editable-install .pth cannot pre-load
+# hf_common before the patch runs.
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ADAPTERS_DIR = os.path.join(REPO_ROOT, "hf_adapters")
@@ -141,6 +139,13 @@ elif not _ALREADY_PATCHED:
 # both branches are skipped: hf_adapters is patched and the registry is
 # already populated from the first execution.
 
+# Lazy import: hf_common is now patched (CPU lane) or the real spyre version
+# (spyre lane). Either way hf_adapters is safe to import at this point.
+from hf_adapters.auto_spyre_model import (  # noqa: E402
+    CONFIG_TO_ADAPTER_MODULE_MAPPING,
+    resolve_adapter_module,
+)
+
 
 def pytest_configure(config: Config) -> None:
     config.addinivalue_line(
@@ -205,20 +210,29 @@ def pytest_generate_tests(metafunc: Metafunc) -> None:
 
 def pytest_collection_modifyitems(config: Config, items: list[Item]) -> None:
     """Skip spyre tests if torch_spyre is not installed / device unavailable; skip slow tests unless --run-slow."""
+    skip_reason = None
     try:
         import torch
         import torch_spyre  # noqa: F401 — side effect: registers "spyre" device
-
-        # Verify the device actually registered
-        _ = torch.device("spyre")
-        spyre_available = True
-    except (ImportError, RuntimeError):
-        spyre_available = False
-
-    if not spyre_available:
-        skip_spyre = pytest.mark.skip(
-            reason="torch_spyre not installed or spyre device unavailable"
+    except ImportError as e:
+        skip_reason = (
+            f"import torch_spyre failed under {sys.executable}: {e!r}. "
+            "Install it with `uv sync --group spyre`, and if you use a "
+            "separately-activated venv, check it's the one uv actually runs "
+            "(uv ignores an active VIRTUAL_ENV that doesn't match the project "
+            "environment)."
         )
+    else:
+        try:
+            # Verify the device actually registered
+            _ = torch.device("spyre")
+        except RuntimeError as e:
+            skip_reason = (
+                f"torch_spyre imported but the 'spyre' device failed to register: {e!r}"
+            )
+
+    if skip_reason:
+        skip_spyre = pytest.mark.skip(reason=skip_reason)
         for item in items:
             if "spyre" in item.nodeid or item.get_closest_marker("requires_spyre"):
                 item.add_marker(skip_spyre)

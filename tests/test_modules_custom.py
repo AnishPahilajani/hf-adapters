@@ -300,6 +300,52 @@ def randomize_weights_xavier(module: torch.nn.Module, seed: int = 0) -> None:
             p.copy_(tmp.to(p.dtype))
 
 
+def _finalize_vllm_weights(module: torch.nn.Module) -> None:
+    """Run vLLM's ``process_weights_after_loading`` on every quantized submodule.
+
+    In vLLM's real model-loading flow this hook is called once weights are on the
+    target device; for linear layers it is what sets ``layer.cpu_linear`` (via
+    ``dispatch_cpu_unquantized_gemm``) — the callable ``forward``/``apply`` later
+    invokes for the CPU GEMM. Because this harness builds the module and randomizes
+    weights directly (bypassing the loader), that hook never runs, so ``forward``
+    hits ``AttributeError: '...Linear' object has no attribute 'cpu_linear'``.
+
+    Call this AFTER weights are randomized and moved to their final dtype/device:
+    the CPU dispatch prepacks/rewrites ``layer.weight`` in place, so the final
+    values must already be present.
+
+    The CPU GEMM dispatch prefers oneDNN / sgl-kernel prepacked kernels when the
+    ``_C`` extension advertises them, but the vLLM nightly CPU wheel's oneDNN
+    ``create_onednn_mm_handler`` SIGSEGVs in this OOT environment (uncatchable —
+    it kills the worker, not a ``RuntimeError``). Force the plain
+    ``torch.nn.functional.linear`` fallback by hiding those fast paths for the
+    duration of the finalize call, then restore the originals.
+    """
+    from vllm import _custom_ops as _ops
+    from vllm import envs as _envs
+
+    saved_onednn = getattr(_ops, "_supports_onednn", False)
+    saved_sgl = getattr(_envs, "VLLM_CPU_SGL_KERNEL", False)
+    _ops._supports_onednn = False
+    try:
+        _envs.VLLM_CPU_SGL_KERNEL = False
+    except Exception:
+        saved_sgl = None  # env is read-only; leave it untouched on restore
+    try:
+        for submodule in module.modules():
+            quant_method = getattr(submodule, "quant_method", None)
+            finalize = getattr(quant_method, "process_weights_after_loading", None)
+            if finalize is not None:
+                finalize(submodule)
+    finally:
+        _ops._supports_onednn = saved_onednn
+        if saved_sgl is not None:
+            try:
+                _envs.VLLM_CPU_SGL_KERNEL = saved_sgl
+            except Exception:
+                pass
+
+
 # Some vLLM modules take a non-activation object (e.g. a weight-carrying layer)
 # as a forward argument that the generator cannot capture as a tensor. These
 # builders synthesize that extra argument inside the vLLM context (so layers that
@@ -409,6 +455,11 @@ def _run_vllm_module(
             module.eval()
             if device is not None:
                 module = module.to(device)
+
+            # Mirror vLLM's loader: finalize weights so linear layers get their
+            # ``cpu_linear`` dispatch set. Must run after the .to(dtype)/.to(device)
+            # above because the CPU dispatch prepacks/rewrites layer.weight in place.
+            _finalize_vllm_weights(module)
 
             # Synthesize any non-tensor forward argument the generator could not
             # capture (e.g. LogitsProcessor's lm_head layer). Built here so it is

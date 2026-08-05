@@ -16,7 +16,6 @@ import os
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, StaticCache
-from hf_adapters import AutoSpyreModelForCausalLM
 from utils.torchop_yaml import TorchOpCollector, require_cuda, setup_logging
 
 
@@ -27,8 +26,11 @@ def main():
     model_path = "Qwen/Qwen2.5-7B-Instruct"
     prompt = "Give me a short introduction to large language model."
     messages = [
-        {"role": "system", "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."},
-        {"role": "user", "content": prompt}
+        {
+            "role": "system",
+            "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.",
+        },
+        {"role": "user", "content": prompt},
     ]
 
     device = "cuda"

@@ -175,8 +175,6 @@ jobs:
 
       - name: setup venv
         run: |
-          pwd
-          ls -la
           uv venv
           source .venv/bin/activate
           echo "VIRTUAL_ENV $VIRTUAL_ENV"
@@ -184,17 +182,10 @@ jobs:
       - name: Stop test here
         run: exit 0
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip
-          pip install -e .
-          # clickhouse-connect and python-dotenv are named explicitly because
-          # `pip install -e .` does NOT pull them: they live in the `dev` and
-          # `models-ops` dependency groups respectively (pyproject.toml), and
-          # dependency groups are not installed by a plain editable install.
-          # Omitting them fails this job at import time on the sink.
-          pip install huggingface_hub tqdm transformers clickhouse-connect python-dotenv
+          source .venv/bin/activate
+          uv pip install huggingface_hub tqdm transformers clickhouse-connect python-dotenv
 
       # TEMPORARY debug step: confirms HF_TOKEN actually reaches this job as a
       # working credential, and re-runs the real keep()-filter checks against
@@ -204,6 +195,7 @@ jobs:
       # Remove once the 0-kept-models issue is root-caused.
       - name: Verify HF Hub authentication
         run: |
+          source .venv/bin/activate
           python -m pip freeze | grep -iE "^(huggingface-hub|transformers)==" || true
           python - <<'PY'
           import os
@@ -244,6 +236,7 @@ jobs:
       # python with working-directory: '.'.
       - name: Verify ClickHouse connection
         run: |
+          source .venv/bin/activate
           echo "ClickHouse target: $CLICKHOUSE_TARGET"
           MISSING=0
           for VAR in CLICKHOUSE_HOST CLICKHOUSE_PORT CLICKHOUSE_USER CLICKHOUSE_PASS CLICKHOUSE_DB; do
@@ -297,6 +290,7 @@ jobs:
           # snapshot_date is computed once here and forwarded to every scan
           # job via the generate-matrix output, so a run straddling midnight
           # records a consistent date across all shards and their terminal rows.
+          source .venv/bin/activate
           SNAPSHOT_DATE="${{ inputs.snapshot_date || '' }}"
           if [[ -z "$SNAPSHOT_DATE" ]]; then
             SNAPSHOT_DATE=$(date -u +%Y-%m-%d)

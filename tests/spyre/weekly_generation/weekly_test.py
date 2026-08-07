@@ -384,6 +384,8 @@ def main(
     from tests.spyre.weekly_generation.sink.result_sink import ResultSink
 
     print(f"{ts()} Starting main.")
+    print(f"{ts()} Snapshot date: {snapshot_date}")
+
     total_freed: int = 0
 
     models_per_process = {

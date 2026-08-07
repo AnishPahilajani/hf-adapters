@@ -182,7 +182,8 @@ jobs:
       - name: Install Python dependencies
         run: |
           source .venv/bin/activate
-          uv pip install huggingface_hub tqdm transformers clickhouse-connect python-dotenv torch
+          uv pip install huggingface_hub tqdm transformers clickhouse-connect python-dotenv
+          uv pip install torch --index-url https://download.pytorch.org/whl/cpu
 
       # TEMPORARY debug step: confirms HF_TOKEN actually reaches this job as a
       # working credential, and re-runs the real keep()-filter checks against

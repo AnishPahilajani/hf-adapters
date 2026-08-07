@@ -179,13 +179,10 @@ jobs:
           source .venv/bin/activate
           echo "VIRTUAL_ENV $VIRTUAL_ENV"
 
-      - name: Stop test here
-        run: exit 0
-
       - name: Install Python dependencies
         run: |
           source .venv/bin/activate
-          uv pip install huggingface_hub tqdm transformers clickhouse-connect python-dotenv
+          uv pip install huggingface_hub tqdm transformers clickhouse-connect python-dotenv torch
 
       # TEMPORARY debug step: confirms HF_TOKEN actually reaches this job as a
       # working credential, and re-runs the real keep()-filter checks against

@@ -46,8 +46,7 @@ on:
         default: "10000"
       model_type:
         description: >-
-          Model type to scan (manual runs only — the scheduled run always
-          scans all)
+          Model type to scan
         required: false
         type: choice
         options:
@@ -57,18 +56,13 @@ on:
         default: all
       snapshot_date:
         description: >-
-          Snapshot date (YYYY-MM-DD). Defaults to today. Override when
-          backfilling or replaying a specific scan.
+          Snapshot date (YYYY-MM-DD). Defaults to today.
         required: false
         type: string
         default: ""
       clickhouse_db:
         description: >-
-          Which ClickHouse instance to write to. Defaults to dev for manual
-          runs so an ad-hoc scan can't clobber the production table; the
-          scheduled run always writes to prod regardless of this input (the
-          `inputs` context is empty for schedule triggers — see the env block
-          below).
+          Which ClickHouse instance to write to: dev or prod.
         required: false
         type: choice
         options:
@@ -170,10 +164,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+      - name: Check Python
+        run: |
+          which python3
+          python3 --version
+          python3 -m pip --version
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+
+      - name: setup venv
+        run: |
+          pwd
+          ls -la
+          uv venv
+          source .venv/bin/activate
+          echo "VIRTUAL_ENV $VIRTUAL_ENV"
+
+      - name: Stop test here
+        run: exit 0
 
       - name: Install dependencies
         run: |

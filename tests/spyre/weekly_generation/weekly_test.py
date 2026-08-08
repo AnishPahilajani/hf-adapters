@@ -446,7 +446,7 @@ def main(
         for batch_idx, batch in enumerate(batches, start=1):
             batch_start = time.monotonic()
             batch_paths = [str(r["model_id"]) for r in batch]
-            batch_curated = [r['curated'] for r in batch]
+            batch_curated = [r["curated"] for r in batch]
             print(
                 f"\n{ts()} [batch {batch_idx}/{total_batches}] {len(batch)} model(s) "
                 f"(overall elapsed: {batch_start - overall_start:.0f}s)"

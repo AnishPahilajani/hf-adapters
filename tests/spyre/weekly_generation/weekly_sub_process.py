@@ -18,6 +18,7 @@ The child never touches the sink. It returns plain dicts over the queue and the
 parent does all the writing, which keeps database credentials and connection
 state in one process.
 """
+
 import os
 import sys
 import traceback as _traceback

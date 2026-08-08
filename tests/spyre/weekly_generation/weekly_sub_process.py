@@ -18,7 +18,6 @@ The child never touches the sink. It returns plain dicts over the queue and the
 parent does all the writing, which keeps database credentials and connection
 state in one process.
 """
-
 import os
 import sys
 import traceback as _traceback
@@ -115,6 +114,7 @@ def _process_batch(
             "error": None,
             "failure_category": None,
         }
+        print(f"{ts()} - {model_path} " + ("\t(curated)" if row["curated"] else ""))
         try:
             try:
                 adapter_module = resolve_adapter_module_for_test(model_path)

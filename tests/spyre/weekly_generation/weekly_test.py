@@ -446,12 +446,13 @@ def main(
         for batch_idx, batch in enumerate(batches, start=1):
             batch_start = time.monotonic()
             batch_paths = [str(r["model_id"]) for r in batch]
+            batch_curated = [r['curated'] for r in batch]
             print(
                 f"\n{ts()} [batch {batch_idx}/{total_batches}] {len(batch)} model(s) "
                 f"(overall elapsed: {batch_start - overall_start:.0f}s)"
             )
-            for path in batch_paths:
-                print(f"{ts()}     - {path}")
+            for path, curated in zip(batch_paths, batch_curated):
+                print(f"{ts()} - {path}" + ("\t(curated)" if curated else ""))
 
             # Track which weights existed BEFORE this batch ran, so we can
             # decide per-model whether to delete after.
@@ -589,7 +590,8 @@ def main(
                     f"{ts()}     sink: row written for '{model_path}' "
                     f"(verified_on_cpu={rec.get('verified_on_cpu')}, "
                     f"verified_on_spyre={rec.get('verified_on_spyre')}, "
-                    f"failure_category={rec.get('failure_category')}, )"
+                    f"failure_category={rec.get('failure_category')}, "
+                    f"curated={rec.get('curated')})"
                 )
 
             # Cache cleanup: delete weights downloaded during this batch,

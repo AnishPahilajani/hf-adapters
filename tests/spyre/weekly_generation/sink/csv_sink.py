@@ -69,13 +69,13 @@ class CsvResultSink(ResultSink):
             "verified_on_cpu": verified_on_cpu,
             "verified_on_gpu": verified_on_gpu,
             "verified_on_spyre": verified_on_spyre,
-            "curated": curated,
             "num_downloads": num_downloads,
             "family": family,
             "architecture": architecture,
             "parameters_number": parameters_number,
             "failure_category": failure_category,
             "error": error,
+            "curated": curated,
         }
         self._writer.writerow(rec)
         self._fh.flush()

@@ -117,13 +117,13 @@ class ClickHouseResultSink(ResultSink):
                 verified_on_cpu,
                 verified_on_gpu,
                 verified_on_spyre,
-                curated,
                 num_downloads,
                 family,
                 architecture,
                 parameters_number,
                 failure_category or "",
                 error or "",
+                curated,
             ]
         )
 

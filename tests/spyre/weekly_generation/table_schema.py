@@ -24,14 +24,14 @@ Columns:
   - verified_on_cpu    (Bool)     – passes on CPU
   - verified_on_gpu    (Bool)     – passes on GPU
   - verified_on_spyre  (Bool)     – passes on Spyre
-  - curated            (Bool)     – model came from a hand-maintained curated list
-                                    rather than the top-K download ranking
   - num_downloads      (UInt64)   – number of downloads
   - family             (String)   – model family reported by the catalog
   - architecture       (String)   – model architecture reported by the catalog
   - parameters_number  (UInt64)   – number of model parameters
   - failure_category   (String?)  – classification for failures (optional - None if model passed)
   - error              (String?)  – error message if the model failed (optional - None if model passed)
+  - curated            (Bool)     – model came from a hand-maintained curated list
+                                    rather than the top-K download ranking
 """
 
 from __future__ import annotations
@@ -52,13 +52,13 @@ TABLE_COLUMNS: tuple[str, ...] = (
     "verified_on_cpu",
     "verified_on_gpu",
     "verified_on_spyre",
-    "curated",
     "num_downloads",
     "family",
     "architecture",
     "parameters_number",
     "failure_category",
     "error",
+    "curated",
 )
 
 
@@ -81,13 +81,13 @@ CREATE TABLE IF NOT EXISTS {DATABASE}.{table_name}
     verified_on_cpu   Bool,
     verified_on_gpu   Bool,
     verified_on_spyre Bool,
-    curated           Bool DEFAULT false,
     num_downloads     UInt64,
     family            String,
     architecture      String,
     parameters_number UInt64,
     failure_category  Nullable(String),
-    error             Nullable(String)
+    error             Nullable(String),
+    curated           Bool DEFAULT false
 )
 ENGINE = ReplacingMergeTree(snapshot_date)
 ORDER BY (model_name, snapshot_date)

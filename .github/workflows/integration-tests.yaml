@@ -1,9 +1,16 @@
 name: integration-tests
+run-name: integration-tests (${{ inputs.test_type || 'smoke' }})
+# NOTE: run-name intentionally shows the RAW, user-facing input (before
+# _test_matrix.yaml's resolve-test-type job resolves unit/integration/regression
+# to core/smoke/full) -- this is also what push-to-clickhouse.yaml's trigger_type
+# ends up recording, so ClickHouse sees the tier name callers actually asked for.
 
 # ---------------------------------------------------------------------------
 # Triggered by commits in upstream dependant repos (deeptools, flex, torch-spyre etc.) via
-# workflow_dispatch.  Runs the full test matrix against a specified
-# hf-adapters ref so regressions from upstream changes are caught early.
+# workflow_dispatch. Runs the smoke suite (test_type default) against a
+# specified hf-adapters ref so regressions from upstream changes are caught
+# early without paying for the full matrix on every upstream commit; pass
+# test_type/models explicitly for a broader check.
 #
 # Example caller pattern from an upstream repo's workflow:
 #
@@ -53,17 +60,46 @@ on:
         description: |
           Per-PR ephemeral runner-set IMAGE label
           (image_torch_spyre_pinned_pr_<component>_<sha12>).
-          Leave empty to use the standing image_torch_spyre_pinned set.
+          Leave empty to use the standing image_torch_spyre set.
         required: false
         type: string
         default: ''
       test_type:
         description: >-
-          Suite subset to run: smoke | core | full | suite_<group> | <label>.
-          Default: full (every config).
+          Test tier to run: smoke | core | full | trunk -- or the user-facing
+          tier aliases unit (= core) | integration (= smoke) | regression
+          (= full), for callers (e.g. spyre-frameworks config.yaml) that speak
+          in tier names rather than suite names. "smoke" runs only the smoke
+          suite; "core" runs every other suite (load, token_compare,
+          embed_compare, vlm, model_module); "full"/"trunk" run everything
+          (trunk mirrors this repo's push-to-main CI label — see
+          resolve_test_type.sh). This is a plain string underneath (see
+          _test_matrix.yaml's resolve-test-type job), so a caller using the
+          API/gh CLI can also pass an individual suite key or a
+          space-separated combo (e.g. "smoke token_compare") for finer
+          control than the dropdown offers -- but GitHub validates `choice`
+          options against the REST API dispatch too, not just the web UI
+          dropdown, so every value a real caller sends (like the "trunk" tier
+          above) must be listed explicitly below.
+        required: false
+        type: choice
+        default: smoke
+        options:
+          - smoke
+          - core
+          - full
+          - trunk
+      models:
+        description: >-
+          Space-separated list of model paths to restrict every matrix job
+          (smoke/load/token-compare/embed-compare/vision) to, e.g.
+          "Qwen/Qwen3-0.6B ministral/Ministral-3B-Instruct". Must match paths
+          exactly as they appear in tests/model_registry.py. Leave empty
+          (default) to fall back to a fixed 3-model spot-check -- see
+          run-tests below.
         required: false
         type: string
-        default: full
+        default: 'Qwen/Qwen3-0.6B ministral/Ministral-3B-Instruct ibm-granite/granite-4.0-1b-base'
 
 concurrency:
   group: ${{ github.workflow }}-${{ (github.event_name == 'pull_request' && github.event.pull_request.html_url) || (github.event_name == 'workflow_dispatch'
@@ -96,19 +132,24 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
-  # Run the full test matrix currently same as "run-tests" job in
-  # torch_spyre_tests.yaml
+  # Delegates to the same reusable _test_matrix.yaml used by "run-tests" in
+  # torch_spyre_tests.yaml. `test_type` defaults to "smoke" and, if `models`
+  # is left empty, falls back to a fixed 3-model spot-check (Qwen3-0.6B,
+  # Ministral-3B-Instruct, granite-4.0-1b-base) -- so upstream-triggered runs
+  # stay fast by default. Pass test_type: full and/or an explicit models
+  # value for full coverage.
   # ---------------------------------------------------------------------------
   run-tests:
     needs: provenance
     uses: ./.github/workflows/_test_matrix.yaml
     with:
-      image_label: ${{ inputs.runner_label || 'image_torch_spyre_pinned' }}
+      image_label: ${{ inputs.runner_label || 'image_torch_spyre' }}
       extra_test_flags: -vvv -s
       extra_test_flags_multi_spyre: -vvv -s
       ref: ${{ inputs.ref || '' }}
       repository: ${{ inputs.repository || '' }}
-      test_type: ${{ inputs.test_type || 'full' }}
+      test_type: ${{ inputs.test_type || 'smoke' }}
+      models: ${{ inputs.models || 'Qwen/Qwen3-0.6B ministral/Ministral-3B-Instruct ibm-granite/granite-4.0-1b-base' }}
 
   # ----------------------------------------------------------------------------------
   # Fan-in gate job so callers can poll a single stable job name for pass/fail.

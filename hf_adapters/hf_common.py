@@ -110,6 +110,9 @@ def get_backbone(model):
         inner = model.transformer
     elif hasattr(model, "gpt_neox"):
         inner = model.gpt_neox
+    elif hasattr(model, "roberta"):
+        # XLMRobertaForSequenceClassification keeps the backbone at .roberta
+        inner = model.roberta
     else:
         inner = model
     return getattr(inner, "language_model", inner)
@@ -1107,41 +1110,22 @@ def _patch_torch_empty():
 def _embedding_param_ids(model):
     """Data-pointers of weights that must keep the default (column-major) layout.
 
-    Gather-only embedding weights (used via nn.Embedding, not matmul) must not
+    Gather-only embedding weights (used via ``nn.Embedding``, not matmul) must not
     receive a row-major SpyreTensorLayout. Returns the set of ``data_ptr()``
     values for all such weights.
 
-    Covers:
-    - Decoder-style backbones: ``backbone.embed_tokens``.
-    - BERT-style backbones: ``backbone.embeddings.{word,position,token_type}_embeddings``.
-    - GPT-2-style backbones: ``backbone.{wte,wpe}`` (token + learned-position
-      tables — both gathered, never matmul'd).
-    - GPT-NeoX backbones: ``backbone.embed_in`` (token gather table).
+    Found by walking ``named_modules`` for ``nn.Embedding`` rather than matching
+    known attribute names. The name-matching version missed ModernBERT's
+    ``embeddings.tok_embeddings`` (and would miss the next new spelling), which
+    silently sent a [180000, 384] table down the matmul-weight path.
     """
-    ids = set()
-    backbone = get_backbone(model)
-
-    # Decoder-style: single embed_tokens; GPT-NeoX: embed_in
-    for name in ("embed_tokens", "embed_in"):
-        embed = getattr(backbone, name, None)
-        if embed is not None and hasattr(embed, "weight"):
-            ids.add(embed.weight.data_ptr())
-
-    # Encoder-style: embeddings submodule with multiple gather tables
-    embeddings = getattr(backbone, "embeddings", None)
-    if embeddings is not None:
-        for name in ("word_embeddings", "position_embeddings", "token_type_embeddings"):
-            sub = getattr(embeddings, name, None)
-            if sub is not None and hasattr(sub, "weight") and sub.weight.dim() == 2:
-                ids.add(sub.weight.data_ptr())
-
-    # GPT-2-style: word (wte) + learned-position (wpe) gather tables
-    for name in ("wte", "wpe"):
-        sub = getattr(backbone, name, None)
-        if sub is not None and hasattr(sub, "weight") and sub.weight.dim() == 2:
-            ids.add(sub.weight.data_ptr())
-
-    return ids
+    return {
+        module.weight.data_ptr()
+        for module in model.modules()
+        if isinstance(module, nn.Embedding)
+        and module.weight is not None
+        and module.weight.dim() == 2
+    }
 
 
 def untie_embedding_and_lm_head(model):
@@ -1274,6 +1258,8 @@ def move_model_to_spyre(model, module, dtype: torch.dtype) -> None:
     # print("Moving model to Spyre ...")
     _patch_torch_empty()
     _move_to_spyre_with_layout(model, dtype)
+    for submod_name in getattr(model, "_spyre_cpu_submodules", []):
+        model.get_submodule(submod_name).to("cpu")
     print("Model on Spyre ready.")
 
 
@@ -1336,6 +1322,13 @@ def _resolve_generation_params(model, tokenizer, overrides):
         "top_p": cfg.top_p,
         "eos_ids": _normalize_eos_ids(eos),
     }
+
+
+def generation_cache_len(prompt_length, max_new_tokens):
+    """Return KV-cache capacity for block-padded prompt and generation tokens."""
+    padded_prompt_len = math.ceil(prompt_length / BLOCK_SIZE) * BLOCK_SIZE
+    padded_generation_len = math.ceil(max_new_tokens / BLOCK_SIZE) * BLOCK_SIZE
+    return padded_prompt_len + padded_generation_len
 
 
 def pad_and_position(input_ids, actual_lengths):
@@ -1504,10 +1497,7 @@ def generate(
 
     # Block-pad to a BLOCK_SIZE multiple; real tokens right-aligned (positions
     # 0..actual_len-1 at padded indices prompt_offsets[b]..padded_len-1).
-    max_cache_len = (
-        math.ceil(prompt_length / BLOCK_SIZE) * BLOCK_SIZE
-        + math.ceil(max_new_tokens / BLOCK_SIZE) * BLOCK_SIZE
-    )
+    max_cache_len = generation_cache_len(prompt_length, max_new_tokens)
     input_ids, padded_len, prompt_offsets, position_ids = pad_and_position(
         input_ids, actual_prompt_lengths
     )
@@ -1653,18 +1643,21 @@ def generate(
 # ---------------------------------------------------------------------------
 
 
-def make_standard_gqa_block(layer):
-    """Compiled block for standard GQA models (separate QKV, no multipliers).
+class StandardGQAAttention(nn.Module):
+    """Attention executed by the standard GQA Spyre adapter path."""
 
-    Shared by Llama, Qwen2, Mistral, and other standard GQA adapters.
-    """
-    attn = layer.self_attn
-    mlp = layer.mlp
-    input_ln = layer.input_layernorm
-    post_attn_ln = layer.post_attention_layernorm
-    v_head_dim = getattr(attn, "v_head_dim", attn.head_dim)
+    def __init__(self, attn):
+        super().__init__()
+        self.q_proj = attn.q_proj
+        self.k_proj = attn.k_proj
+        self.v_proj = attn.v_proj
+        self.o_proj = attn.o_proj
+        self.head_dim = attn.head_dim
+        self.v_head_dim = getattr(attn, "v_head_dim", attn.head_dim)
+        self.scaling = attn.scaling
 
-    def block_forward(
+    def forward(
+        self,
         hidden_states,
         selected_freqs,
         attn_mask,
@@ -1674,13 +1667,22 @@ def make_standard_gqa_block(layer):
         token_index,
         cache_position,
     ):
-        residual = hidden_states
-        h = input_ln(hidden_states)
-
-        bsz, seq_len, _ = h.shape
-        q = attn.q_proj(h).view(bsz, seq_len, -1, attn.head_dim).transpose(1, 2)
-        k = attn.k_proj(h).view(bsz, seq_len, -1, attn.head_dim).transpose(1, 2)
-        v = attn.v_proj(h).view(bsz, seq_len, -1, v_head_dim).transpose(1, 2)
+        bsz, seq_len, _ = hidden_states.shape
+        q = (
+            self.q_proj(hidden_states)
+            .view(bsz, seq_len, -1, self.head_dim)
+            .transpose(1, 2)
+        )
+        k = (
+            self.k_proj(hidden_states)
+            .view(bsz, seq_len, -1, self.head_dim)
+            .transpose(1, 2)
+        )
+        v = (
+            self.v_proj(hidden_states)
+            .view(bsz, seq_len, -1, self.v_head_dim)
+            .transpose(1, 2)
+        )
 
         q = apply_rope_matmul(q, selected_freqs)
         k = apply_rope_matmul(k, selected_freqs)
@@ -1701,22 +1703,78 @@ def make_standard_gqa_block(layer):
             value_cache,
             attn_mask=attn_mask,
             dropout_p=0.0,
-            scale=attn.scaling,
+            scale=self.scaling,
             enable_gqa=True,
         )
         attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
-        attn_out = attn.o_proj(attn_out)
+        return self.o_proj(attn_out), key_cache, value_cache
 
-        h = residual + attn_out
+
+class StandardGQABlock(nn.Module):
+    """Registered decoder block used by standard GQA Spyre adapters."""
+
+    def __init__(self, layer, is_res_mul: bool | None = None):
+        super().__init__()
+        self.self_attn = StandardGQAAttention(layer.self_attn)
+        self.mlp = layer.mlp
+        self.input_layernorm = layer.input_layernorm
+        self.post_attention_layernorm = layer.post_attention_layernorm
+        self.residual_multiplier = layer.residual_multiplier if is_res_mul else None
+        self.train(layer.training)
+
+    def forward(
+        self,
+        hidden_states,
+        selected_freqs,
+        attn_mask,
+        key_cache,
+        value_cache,
+        is_filling,
+        token_index,
+        cache_position,
+    ):
+        residual = hidden_states
+        h = self.input_layernorm(hidden_states)
+        attn_out, key_cache, value_cache = self.self_attn(
+            h,
+            selected_freqs,
+            attn_mask,
+            key_cache,
+            value_cache,
+            is_filling,
+            token_index,
+            cache_position,
+        )
+
+        if self.residual_multiplier is None:
+            h = residual + attn_out
+        else:
+            h = residual + attn_out * self.residual_multiplier
 
         residual = h
-        h = post_attn_ln(h)
-        h = mlp(h)
-        h = residual + h
+        h = self.post_attention_layernorm(h)
+        h = self.mlp(h)
+        if self.residual_multiplier is None:
+            h = residual + h
+        else:
+            h = residual + h * self.residual_multiplier
 
         return h, key_cache, value_cache
 
-    return torch.compile(block_forward, dynamic=False)
+
+def make_standard_gqa_block(layer, is_res_mul: bool | None = None):
+    """Compile one standard GQA block without registering it on a parent model."""
+    return torch.compile(StandardGQABlock(layer, is_res_mul), dynamic=False)
+
+
+def prepare_standard_gqa_blocks(layers, is_res_mul: bool | None = None):
+    """Replace decoder layers with registered Spyre blocks and compile them."""
+    blocks = []
+    for i, layer in enumerate(list(layers)):
+        block = StandardGQABlock(layer, is_res_mul)
+        layers[i] = block
+        blocks.append(torch.compile(block, dynamic=False))
+    return blocks
 
 
 def make_decoder_block(
@@ -1949,20 +2007,27 @@ def make_encoder_block(
     def block_forward(hidden_states, attn_mask):
         bsz, seq_len, _ = hidden_states.shape
 
+        # ``.contiguous()`` after the transpose is REQUIRED on Spyre: the fused
+        # lowering of ``transpose(1, 2) -> scaled_dot_product_attention`` reads
+        # the non-contiguous (transposed) q/k/v with the wrong stick layout and
+        # returns garbage (per-token cosine ~0 vs CPU). No-op on CPU.
         q = (
             q_proj(hidden_states)
             .view(bsz, seq_len, num_heads, head_dim)
             .transpose(1, 2)
+            .contiguous()
         )
         k = (
             k_proj(hidden_states)
             .view(bsz, seq_len, num_heads, head_dim)
             .transpose(1, 2)
+            .contiguous()
         )
         v = (
             v_proj(hidden_states)
             .view(bsz, seq_len, num_heads, head_dim)
             .transpose(1, 2)
+            .contiguous()
         )
 
         attn_out = F.scaled_dot_product_attention(
@@ -2058,6 +2123,27 @@ def make_vision_encoder_block(
     return torch.compile(block_forward, dynamic=False)
 
 
+def add_token_type_embedding(h, emb, token_type_ids):
+    """Add the token-type embedding, special-casing a single-row table.
+
+    Checkpoints with ``type_vocab_size == 1`` (bge-m3, bge-reranker-v2-m3,
+    granite-embedding-125m/278m) carry a one-row ``token_type_embeddings``
+    table, so every index is 0 and the gather is really a broadcast-add of that
+    single row. Emitting it as a gather makes the Spyre Inductor backend lower
+    it as a Pointwise op whose two inputs demand incompatible stick layouts —
+    the ids stick along the sequence dim (int32) and the weight along hidden
+    (fp16), and the one output cannot satisfy both.
+
+    Indexing the row directly keeps it a plain broadcast and is numerically
+    identical. The row is not necessarily zero (bge-reranker-v2-m3's has absmax
+    0.205), so it cannot simply be skipped.
+    """
+    table = emb.token_type_embeddings
+    if table.num_embeddings == 1:
+        return h + table.weight[0]
+    return h + table(token_type_ids)
+
+
 def encoder_backbone_forward(model, input_ids, attn_mask, position_ids, token_type_ids):
     """Encoder backbone forward: embedding table + LN + compiled encoder blocks.
 
@@ -2084,11 +2170,8 @@ def encoder_backbone_forward(model, input_ids, attn_mask, position_ids, token_ty
     """
     backbone = get_backbone(model)
     emb = backbone.embeddings
-    h = (
-        emb.word_embeddings(input_ids)
-        + emb.position_embeddings(position_ids)
-        + emb.token_type_embeddings(token_type_ids)
-    )
+    h = emb.word_embeddings(input_ids) + emb.position_embeddings(position_ids)
+    h = add_token_type_embedding(h, emb, token_type_ids)
     h = emb.LayerNorm(h)
     # Spyre layout workaround: BERT post-LN ends each block on a broadcast
     # against a 1D weight/bias. Spyre tensors produced this way read
@@ -2146,9 +2229,9 @@ def prepare_standard_gqa(model, rmsnorm_cls):
     prepare_rope_and_heads(model)
     patch_rmsnorm(rmsnorm_cls)
     pad_lm_head(model)
-    model._spyre_compiled_blocks = [
-        make_standard_gqa_block(layer) for layer in get_backbone(model).layers
-    ]
+    model._spyre_compiled_blocks = prepare_standard_gqa_blocks(
+        get_backbone(model).layers
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2233,37 +2316,9 @@ def prefill_embed(
     )
 
     # Throwaway KV caches sized to padded_len (no decode budget)
-    cfg = text_config(model.config)
-    num_layers = cfg.num_hidden_layers
-    num_kv_heads = cfg.num_key_value_heads
-    head_dim = (
-        getattr(model, "_spyre_head_dim", None)
-        or getattr(cfg, "head_dim", None)
-        or cfg.hidden_size // cfg.num_attention_heads
+    key_caches, value_caches = allocate_kv_caches(
+        model, bsz, padded_len, model_d_type, device=DEVICE
     )
-    v_head_dim = getattr(model, "_spyre_v_head_dim", head_dim)
-    key_caches = [
-        torch.zeros(
-            bsz,
-            num_kv_heads,
-            padded_len,
-            head_dim,
-            dtype=model_d_type,
-            device=DEVICE,
-        )
-        for _ in range(num_layers)
-    ]
-    value_caches = [
-        torch.zeros(
-            bsz,
-            num_kv_heads,
-            padded_len,
-            v_head_dim,
-            dtype=model_d_type,
-            device=DEVICE,
-        )
-        for _ in range(num_layers)
-    ]
 
     h = run_backbone_forward_fn(
         model,
@@ -2363,7 +2418,63 @@ def prefill_encoder(
 
     # Crop the block-pad back off. h is on Spyre here.
     h = h[:, :seq_len, :]
+
     return h
+
+
+# ---------------------------------------------------------------------------
+# Cross-encoder reranker prefill driver (XLM-RoBERTa / BGE reranker family)
+# ---------------------------------------------------------------------------
+
+
+def prefill_reranker(
+    run_encoder_forward_fn: Callable,
+    model,
+    input_ids,
+    attention_mask,
+    token_type_ids=None,
+):
+    """One-shot prefill for cross-encoder reranker models.
+
+    Runs the encoder backbone on Spyre via ``prefill_encoder``,
+    then applies the classification head (``model.classifier``) to produce a
+    scalar relevance score per query-document pair.
+
+    The classification head is run outside torch.compile on CPU to avoid:
+    - ``torch.bernoulli`` (Dropout) which the Spyre backend cannot lower.
+    - ``aten.slice`` for CLS extraction which does not lower on Spyre.
+    - ``out_proj: Linear(hidden, 1)`` whose output dim=1 is not stick-aligned.
+
+    Args:
+        run_encoder_forward_fn: ``fn(model, input_ids, attn_mask, position_ids,
+            token_type_ids) -> [B, padded_len, H]``.
+        model: Prepared ``XLMRobertaForSequenceClassification`` on Spyre.
+        input_ids: ``[B, L]`` token ids on CPU.
+        attention_mask: ``[B, L]`` mask on CPU.
+        token_type_ids: Optional ``[B, L]``. Defaults to all-zeros when None.
+
+    Returns:
+        ``scores``: ``[B]`` float32 tensor on CPU — raw logits.
+    """
+    last_hidden_state = prefill_encoder(
+        run_encoder_forward_fn,
+        model,
+        input_ids,
+        attention_mask,
+        token_type_ids=token_type_ids,
+    )
+
+    # Pass the full [B, L, H] hidden state to the classifier; .to(cls_device)
+    # moves it off Spyre to avoid aten.slice. The classification head does its
+    # own [:, 0, :] CLS extraction internally.
+
+    # Run the classification head on the same device it lives on
+    # (CPU — kept off Spyre via _spyre_cpu_submodules in prepare_for_spyre).
+    classifier = model.classifier
+    cls_device = next(classifier.parameters()).device
+    scores = classifier(last_hidden_state.to(cls_device))  # [B, 1]
+
+    return scores[:, 0].to("cpu")  # [B] raw logits on CPU
 
 
 # ---------------------------------------------------------------------------

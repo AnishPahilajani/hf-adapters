@@ -40,6 +40,7 @@ from hf_adapters.hf_common import (
     kv_cache_update,
     pad_lm_head,
     patch_rmsnorm,
+    split_input_embedding,
     standard_gqa_backbone_forward,
     standard_gqa_forward,
 )
@@ -126,6 +127,7 @@ def prepare_for_spyre(model):
     model._spyre_rope = PrecomputedRotaryEmbedding(get_backbone(model).rotary_emb)
     patch_rmsnorm(Qwen3RMSNorm)
     pad_lm_head(model)
+    split_input_embedding(model)
     model._spyre_compiled_blocks = [
         _make_compiled_block(layer) for layer in get_backbone(model).layers
     ]

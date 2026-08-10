@@ -53,6 +53,7 @@ from hf_adapters import hf_mistral
 from hf_adapters.hf_common import (
     get_backbone,
     prepare_standard_gqa,
+    split_input_embedding,
 )
 
 _run_backbone_forward = hf_mistral._run_backbone_forward
@@ -120,4 +121,5 @@ def prepare_for_spyre(model):
     else:
         rmsnorm_cls = Ministral3RMSNorm
 
+    split_input_embedding(model)
     prepare_standard_gqa(model, rmsnorm_cls)

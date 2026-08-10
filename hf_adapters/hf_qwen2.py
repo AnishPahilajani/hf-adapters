@@ -30,6 +30,7 @@ Usage::
 
 from hf_adapters.hf_common import (
     prepare_standard_gqa,
+    split_input_embedding,
     standard_gqa_backbone_forward,
     standard_gqa_forward,
 )
@@ -42,4 +43,5 @@ def prepare_for_spyre(model):
     """Apply Spyre adaptations to Qwen2 model in-place."""
     from transformers.models.qwen2.modeling_qwen2 import Qwen2RMSNorm
 
+    split_input_embedding(model)
     prepare_standard_gqa(model, Qwen2RMSNorm)

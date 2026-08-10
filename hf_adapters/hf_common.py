@@ -786,6 +786,63 @@ def pad_lm_head(model):
         )
 
 
+class SplitEmbedding(nn.Module):
+    """Embedding table split along the hidden dimension for Spyre gathers.
+
+    Large embedding sources can exceed Spyre's 256 MiB per-core address span
+    after work division. Splitting the hidden dimension gives each gather a
+    smaller source tensor; concatenating their outputs restores the exact
+    original embedding shape.
+    """
+
+    def __init__(self, embedding: nn.Embedding, num_chunks: int = 2):
+        super().__init__()
+        if num_chunks < 2:
+            raise ValueError("num_chunks must be at least 2")
+
+        chunks = embedding.weight.detach().chunk(num_chunks, dim=1)
+        self.embeddings = nn.ModuleList(
+            nn.Embedding.from_pretrained(
+                chunk.clone(),
+                freeze=True,
+                padding_idx=embedding.padding_idx,
+                max_norm=embedding.max_norm,
+                norm_type=embedding.norm_type,
+                scale_grad_by_freq=embedding.scale_grad_by_freq,
+                sparse=embedding.sparse,
+            )
+            for chunk in chunks
+        )
+        self.num_embeddings = embedding.num_embeddings
+        self.embedding_dim = embedding.embedding_dim
+        self.padding_idx = embedding.padding_idx
+
+    def forward(self, input_ids):
+        return torch.cat(
+            [embedding(input_ids) for embedding in self.embeddings], dim=-1
+        )
+
+
+def _embedding_num_chunks(embedding: nn.Embedding) -> int:
+    """Number of hidden-axis chunks needed to keep gather spans within EAR."""
+    table_bytes = embedding.weight.numel() * embedding.weight.element_size()
+    # Gather work division can split the vocabulary axis over four cores. Each
+    # hidden-axis chunk must therefore leave at most four EAR windows of source.
+    max_chunk_bytes = 4 * _EAR_LIMIT_BYTES
+    return max(1, math.ceil(table_bytes / max_chunk_bytes))
+
+
+def split_input_embedding(model):
+    """Split an oversized token embedding enough to fit Spyre's EAR limit."""
+    backbone = get_backbone(model)
+    embedding = backbone.embed_tokens
+    if isinstance(embedding, SplitEmbedding):
+        return
+    num_chunks = _embedding_num_chunks(embedding)
+    if num_chunks > 1:
+        backbone.embed_tokens = SplitEmbedding(embedding, num_chunks=num_chunks)
+
+
 def chunk_lm_head(model, num_chunks=8):
     """Split the LM head weight into N stick-padded chunks along the vocab dim.
 

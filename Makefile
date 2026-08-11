@@ -116,8 +116,7 @@ model-module-tests: ## Run oot_framework module tests (suite key: model_module; 
 # regression|trunk|space-separated suite keys), each writing its own flat
 # JUnit file into RESULTS_DIR so a caller can glob the whole directory in one
 # ClickHouse push. One failing suite doesn't skip the rest; the aggregate's
-# exit code
-# still reflects any failure.
+# exit code still reflects any failure.
 tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite)
 	@# Apply the shared default (empty -> regression) and pass literal tier
 	@# names / suite keys through unchanged -- same source of truth as

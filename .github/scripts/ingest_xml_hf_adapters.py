@@ -12,7 +12,7 @@ Usage (called by the GHA workflow):
         --run-id   "12345678" \
         --triggered-at "2026-04-25T14:20:45Z" \
         --pr-number 2271 \
-        --platform "spyre"
+        --platform "x86_64"
 """
 
 import argparse
@@ -313,12 +313,12 @@ def main():
     parser.add_argument(
         "--trigger-type",
         default="",
-        help="Suite tier that produced this run, e.g. smoke | core | full | trunk",
+        help="Suite tier that produced this run, e.g. smoke | core | full | trunk | weekly | nightly",
     )
     parser.add_argument(
         "--platform",
         default="",
-        help="Hardware platform the suite ran on, e.g. spyre | cpu",
+        help="Hardware platform the suite ran on, e.g. x86_64 | s390x | ppc64le",
     )
     parser.add_argument(
         "--img-digest",

@@ -90,6 +90,7 @@ from hf_adapters.hf_common import (
     generation_cache_len,
     get_backbone,
     get_model_dtype,
+    input_embedding_device,
     pad_and_position,
     patch_layernorm,
     select_next_token,
@@ -228,7 +229,7 @@ def _embed_and_scatter(model, input_ids, image_features):
     image_token_id = model.config.image_token_id
     dtype = get_model_dtype(model)
 
-    ids = input_ids.to(backbone.embed_tokens.weight.device)
+    ids = input_ids.to(input_embedding_device(model))
     h = backbone.embed_tokens(ids)  # scaled word embeddings, on embed device
 
     image_mask = input_ids == image_token_id  # [B, L] bool, CPU

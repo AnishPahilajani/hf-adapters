@@ -80,6 +80,7 @@ from hf_adapters.hf_common import (
     get_backbone,
     kv_cache_update,
     pad_lm_head,
+    split_input_embedding,
     text_config,
 )
 
@@ -433,7 +434,7 @@ def prepare_text_decoder_for_spyre(model):
     3. Build one ``PrecomputedRotaryEmbedding`` per layer type from the model's
        per-type ``inv_freq`` buffers (no head padding — D/2 >= 64 already).
     4. Record per-layer KV-cache shapes (sliding vs global differ).
-    5. Chunk the LM head for the large vocab.
+    5. Split an oversized input embedding and pad the LM head for the large vocab.
     6. Compile each decoder layer's block.
     """
     backbone = _gemma4_backbone(model)
@@ -502,6 +503,9 @@ def prepare_text_decoder_for_spyre(model):
             hd = head_dim
         kv_shapes.append((n_kv, hd, hd))
     model._spyre_kv_shapes = kv_shapes
+
+    # Split oversized gather sources before moving the embedding to Spyre.
+    split_input_embedding(model)
 
     # LM head: smooth-padded to a stick-aligned vocab whose per-core span fits
     # the 256 MB EAR limit (see hf_common.pad_lm_head).

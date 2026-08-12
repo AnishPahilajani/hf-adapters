@@ -816,11 +816,34 @@ class SplitEmbedding(nn.Module):
         self.num_embeddings = embedding.num_embeddings
         self.embedding_dim = embedding.embedding_dim
         self.padding_idx = embedding.padding_idx
+        embed_scale = getattr(embedding, "embed_scale", None)
+        if embed_scale is not None:
+            self.register_buffer(
+                "embed_scale", embed_scale.detach().clone(), persistent=False
+            )
+        if hasattr(embedding, "scalar_embed_scale"):
+            self.scalar_embed_scale = embedding.scalar_embed_scale
+
+    @property
+    def device(self) -> torch.device:
+        return next(self.embeddings.parameters()).device
 
     def forward(self, input_ids):
-        return torch.cat(
+        output = torch.cat(
             [embedding(input_ids) for embedding in self.embeddings], dim=-1
         )
+        if hasattr(self, "embed_scale"):
+            output = output * self.embed_scale.to(output.dtype)
+        return output
+
+
+def input_embedding_device(model) -> torch.device:
+    """Return the device holding a model's normal or split token embedding."""
+    embedding = get_backbone(model).embed_tokens
+    if isinstance(embedding, SplitEmbedding):
+        return embedding.device
+    device: torch.device = embedding.weight.device
+    return device
 
 
 def _embedding_num_chunks(embedding: nn.Embedding) -> int:

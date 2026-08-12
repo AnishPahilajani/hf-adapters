@@ -97,6 +97,12 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_granitemoehybrid.py",
         "size": "3b",
     },
+    "granite41_8b": {
+        "name": "Granite 4.1 8B",
+        "path": "ibm-granite/granite-4.1-8b",
+        "adapter": "hf_granitemoehybrid.py",
+        "size": "8b",
+    },
     # hf_granite_vision.py
     "granite-vision": {
         "name": "Granite Vision 4.1 4B",
@@ -189,6 +195,12 @@ CAUSAL_LM_MODELS = {
         "path": "mistralai/Ministral-3-14B-Instruct-2512",
         "adapter": "hf_mistral3.py",
         "size": "14b",
+    },
+    "ministral3_8b": {
+        "name": "Ministral-3-8B-Instruct-2512",
+        "path": "mistralai/Ministral-3-8B-Instruct-2512",
+        "adapter": "hf_mistral3.py",
+        "size": "8b",
     },
     # hf_olmo.py
     "olmo1b": {
@@ -524,6 +536,46 @@ EMBED_PATHS: list[str] = _select_representative_paths(
     EMBEDDING_MODELS, include_gated=_include_gated_flag
 )
 VISION_PATHS: list[str] = _select_representative_paths(
+    VISION_MODELS,
+    include_gated=_include_gated_flag,
+    predicate=lambda info: info.get("kind") == "vlm",
+)
+
+
+def _all_paths(
+    models: dict[str, dict],
+    *,
+    include_gated: bool,
+    predicate=None,
+) -> list[str]:
+    """All registered paths (no per-adapter reduction), for explicit selection.
+
+    Unlike ``_select_representative_paths``, this keeps every model in ``models``
+    -- used to let an explicit ``--only`` allowlist (see generate_test_matrix.py)
+    target a non-representative checkpoint, e.g. a larger model that shares an
+    adapter with a smaller default.
+    """
+    return [
+        info["path"]
+        for info in models.values()
+        if (include_gated or not info.get("is_gated", False))
+        and (predicate is None or predicate(info))
+    ]
+
+
+# Every registered path per category, bypassing the smallest-per-adapter
+# reduction above -- used by generate_test_matrix.py's ``--only`` allowlist so
+# a caller can target any registered checkpoint, not just the adapter's
+# default representative.
+ALL_CAUSAL_PATHS: list[str] = _all_paths(
+    CAUSAL_LM_MODELS,
+    include_gated=_include_gated_flag,
+    predicate=lambda info: info.get("kind") != "dspark_draft",
+)
+ALL_EMBED_PATHS: list[str] = _all_paths(
+    EMBEDDING_MODELS, include_gated=_include_gated_flag
+)
+ALL_VISION_PATHS: list[str] = _all_paths(
     VISION_MODELS,
     include_gated=_include_gated_flag,
     predicate=lambda info: info.get("kind") == "vlm",

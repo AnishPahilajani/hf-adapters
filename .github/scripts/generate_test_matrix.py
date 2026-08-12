@@ -41,16 +41,24 @@ def generate_matrices(exclude_models=None, only_models=None):
     exclude_models = set(exclude_models or [])
     only_models = set(only_models or [])
 
+    # An explicit --only allowlist selects specific model paths outright, so it
+    # draws from every registered path (ALL_*_PATHS) rather than the
+    # smallest-per-adapter representative set (*_PATHS) used by default --
+    # otherwise a caller could never target a non-representative checkpoint,
+    # e.g. a larger model sharing an adapter with a smaller default.
+    if only_models:
+        causal_source = tests.model_registry.ALL_CAUSAL_PATHS
+        embed_source = tests.model_registry.ALL_EMBED_PATHS
+        vision_source = tests.model_registry.ALL_VISION_PATHS
+    else:
+        causal_source = tests.model_registry.CAUSAL_PATHS
+        embed_source = tests.model_registry.EMBED_PATHS
+        vision_source = tests.model_registry.VISION_PATHS
+
     # Apply exclusions
-    causal_paths = [
-        k for k in tests.model_registry.CAUSAL_PATHS if k not in exclude_models
-    ]
-    embed_paths = [
-        k for k in tests.model_registry.EMBED_PATHS if k not in exclude_models
-    ]
-    vision_paths = [
-        k for k in tests.model_registry.VISION_PATHS if k not in exclude_models
-    ]
+    causal_paths = [k for k in causal_source if k not in exclude_models]
+    embed_paths = [k for k in embed_source if k not in exclude_models]
+    vision_paths = [k for k in vision_source if k not in exclude_models]
     reranker_paths = [
         k for k in tests.model_registry.RERANKER_PATHS if k not in exclude_models
     ]

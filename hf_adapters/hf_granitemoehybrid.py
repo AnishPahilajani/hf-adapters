@@ -44,15 +44,19 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from hf_adapters import hf_granite
 from hf_adapters.hf_common import (
-    PrecomputedRotaryEmbedding,
     apply_rope_matmul,
     get_backbone,
     kv_cache_update,
     pad_lm_head,
     patch_rmsnorm,
+    prepare_rope_and_heads,
     split_fused_linear,
 )
+
+_run_backbone_forward = hf_granite._run_backbone_forward
+_run_forward = hf_granite._run_forward
 
 
 def _make_compiled_block(layer, res_mult, gate_proj, up_proj):
@@ -119,68 +123,6 @@ def _make_compiled_block(layer, res_mult, gate_proj, up_proj):
     return torch.compile(block_forward, dynamic=False)
 
 
-def _run_backbone_forward(
-    model,
-    input_ids,
-    position_ids,
-    attn_mask,
-    key_caches,
-    value_caches,
-    is_filling,
-    token_index,
-    cache_position,
-):
-    """Granite 4.0 backbone: embedding * multiplier, blocks, norm."""
-    backbone = get_backbone(model)
-    h = backbone.embed_tokens(input_ids)
-    h = h * model.config.embedding_multiplier
-
-    selected_freqs = model._spyre_rope(h, position_ids)
-
-    for i, compiled_block in enumerate(model._spyre_compiled_blocks):
-        h, key_caches[i], value_caches[i] = compiled_block(
-            h,
-            selected_freqs,
-            attn_mask,
-            key_caches[i],
-            value_caches[i],
-            is_filling,
-            token_index,
-            cache_position,
-        )
-
-    h = backbone.norm(h)
-    return h
-
-
-def _run_forward(
-    model,
-    input_ids,
-    position_ids,
-    attn_mask,
-    key_caches,
-    value_caches,
-    is_filling,
-    token_index,
-    cache_position,
-):
-    """Granite 4.0 causal-LM forward: backbone + head / scaling."""
-    h = _run_backbone_forward(
-        model,
-        input_ids,
-        position_ids,
-        attn_mask,
-        key_caches,
-        value_caches,
-        is_filling,
-        token_index,
-        cache_position,
-    )
-    logits = model.lm_head(h)
-    logits = logits / model.config.logits_scaling
-    return logits
-
-
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to Granite 4.0 dense model in-place."""
     from transformers.models.granitemoehybrid.modeling_granitemoehybrid import (
@@ -188,14 +130,14 @@ def prepare_for_spyre(model):
     )
 
     layer_types = set(model.config.layer_types)
-    assert "mamba" not in layer_types, (
+    assert layer_types.isdisjoint({"mamba", "linear_attention"}), (
         "hf_granitemoehybrid adapter only supports pure-attention dense models "
         f"(layer_types={sorted(layer_types)}). "
         f"'{model.config._name_or_path}' is a Mamba-attention hybrid — "
         "Mamba SSM layers are not currently supported on Spyre."
     )
 
-    model._spyre_rope = PrecomputedRotaryEmbedding(get_backbone(model).rotary_emb)
+    prepare_rope_and_heads(model)
     patch_rmsnorm(GraniteMoeHybridRMSNorm)
     pad_lm_head(model)
 

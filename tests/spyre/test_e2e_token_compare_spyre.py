@@ -31,20 +31,26 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from model_registry import CAUSAL_PATHS, xfail_non_blocking
+from transformers import PreTrainedModel
 
 from hf_adapters.auto_spyre_model import torch_dtype_for_model_path
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
     DEVICE,
+    generation_cache_len,
     get_model_dtype,
     move_model_to_spyre,
 )
 from tests.conftest import load_ref_model, resolve_adapter_module_for_test
+from tests.model_registry import (
+    CAUSAL_PATHS,
+    NON_BLOCKING_CAUSAL_MODELS,
+    xfail_non_blocking,
+)
 
 
 def hf_greedy_steps(
-    model: nn.Module,
+    model: PreTrainedModel,
     input_ids: torch.Tensor,
     num_decode: int = 4,
 ) -> list[dict[str, Any]]:
@@ -52,7 +58,7 @@ def hf_greedy_steps(
     from transformers import DynamicCache
 
     results = []
-    past = DynamicCache()
+    past = DynamicCache(config=model.config)
     ids = input_ids.clone()
     seq_len = ids.shape[1]
 
@@ -109,10 +115,7 @@ def adapter_greedy_steps(
     position_ids = torch.zeros((batch_size, padded_len), dtype=torch.long)
     position_ids[:, prompt_offset:] = torch.arange(seq_len)
 
-    max_cache_len = (
-        padded_len + math.ceil(num_decode / BLOCK_SIZE) * BLOCK_SIZE + BLOCK_SIZE
-    )
-
+    max_cache_len = generation_cache_len(seq_len, num_decode + 1)
     dtype = get_model_dtype(model)
 
     key_caches, value_caches = allocate_kv_caches(
@@ -329,7 +332,9 @@ def token_compare_spyre(
     return mismatches, rows
 
 
-@pytest.mark.parametrize("model_path", xfail_non_blocking(CAUSAL_PATHS))
+@pytest.mark.parametrize(
+    "model_path", xfail_non_blocking(CAUSAL_PATHS, table=NON_BLOCKING_CAUSAL_MODELS)
+)
 def test_e2e_token_compare_spyre(model_path: str) -> None:
     mismatches, rows = token_compare_spyre(model_path)
     n_match = sum(1 for r in rows if r["top1_match"])

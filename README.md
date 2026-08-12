@@ -1,7 +1,7 @@
 # HF Adapters for Spyre
 
-![adapters](https://img.shields.io/badge/adapters-27-blue)
-![verified](https://img.shields.io/badge/verified_checkpoints-43-green)
+![adapters](https://img.shields.io/badge/adapters-30-blue)
+![verified](https://img.shields.io/badge/verified_checkpoints-46-green)
 ![compatible](https://img.shields.io/badge/compatible_models-100%2B-orange)
 
 Minimal runtime patches that make stock [HuggingFace Transformers](https://github.com/huggingface/transformers) models run on [Spyre](https://research.ibm.com/blog/ibm-spyre) accelerators.
@@ -14,13 +14,15 @@ from `transformers`.
 
 ## Supported Models
 
-**27 adapters · 43 verified checkpoints · 100+ compatible models**
+**30 adapters · 46 verified checkpoints · 100+ compatible models**
 
 Coverage spans **generative** (causal-LM), **embedding** (sentence-transformers),
-and **vision-language** (image→text) models — from Llama / Qwen / Granite / Mistral /
-Phi / Gemma / OLMo / GPT decoders to BERT / XLM-RoBERTa / MPNet / ModernBERT
-encoders and the Granite Vision 4.1 (SigLIP tower + Granite text), Mistral3 Vision
-(Pixtral tower + Mistral text), and Gemma 4 (encoder-free) multimodal VLMs.
+**vision-language** (image→text), and **speculative-decoding drafter** models — from
+Llama / Qwen / Granite / Mistral / Phi / Gemma / OLMo / GPT decoders to BERT /
+XLM-RoBERTa / MPNet / ModernBERT encoders, the Granite Vision 4.1 (SigLIP tower +
+Granite text), Mistral3 Vision (Pixtral tower + Mistral text), and Gemma 4
+(encoder-free) multimodal VLMs, plus the DSpark block-propose drafters for
+Qwen 3 / Granite / Gemma 4.
 
 Each adapter covers all size variants and fine-tuned checkpoints sharing the same
 HuggingFace `model_type`. The **canonical, per-adapter model lists** — verified

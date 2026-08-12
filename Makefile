@@ -2,13 +2,25 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
 # TEST_TYPE selects which subset of tests to run (uniform knob across the
-# product repos: torch-spyre, hf-adapters, spyre-inference):
-#   smoke — fast per-op unit tests only
-#   core  — all spyre-native tests (excludes the heavy upstream suites)
-#   full  — everything (default)
+# product repos: torch-spyre, hf-adapters, spyre-inference). These tier names
+# are literal, first-class values -- there is no alias-resolution layer:
+#   unit        — all spyre-native tests (excludes the heavy upstream suites)
+#   integration — the smoke suite. This is the ONLY valid top-level tier for
+#                 that suite -- TEST_TYPE=smoke by itself is rejected (see the
+#                 `tests` target below); "smoke" is just the individual suite
+#                 key "integration" maps to, still usable inside a
+#                 multi-suite combo (e.g. TEST_TYPE="smoke load").
+#   regression  — everything
+#   trunk       — same coverage as regression; push-to-main CI label (see
+#                 resolve_test_type.sh)
+#   perf        — SCAFFOLD ONLY: no benchmark harness yet, writes a placeholder
+#                 empty JUnit XML (no .benchmark classname, so ingest reads it
+#                 as 0 rows). A real producer (like torch-spyre's
+#                 spyre-perf-suite) is a follow-up.
 # Also accepts a space-separated list of individual suite keys (matches
 # _test_matrix.yaml's `test_type` semantics), e.g. TEST_TYPE="smoke load".
-TEST_TYPE ?= full
+# Empty / unset defaults to "regression" (every suite).
+TEST_TYPE ?= regression
 
 # MODEL_KEY narrows a suite to one model via pytest's -k filter (matrix-style
 # per-model CI jobs pass this); empty = run every model in the suite.
@@ -20,7 +32,10 @@ PYTEST_ARGS ?= -s -vvv
 # Pytest invocation. Override e.g. `make adapter-coverage-tests PYTEST="python -m pytest"`
 # for callers without a uv-managed venv (the adapter-coverage job runs on a bare
 # ubuntu-latest runner with only `pip install pytest`, no uv/project venv).
-PYTEST ?= uv run pytest
+# --active --no-sync targets the prebaked image venv ($VIRTUAL_ENV) and skips
+# re-resolution: the lockfile pins torch to a +cpu build that has no ppc64le wheel,
+# so any resolve fails there even though the venv already has a local torch build.
+PYTEST ?= uv run --active --no-sync pytest
 
 # When set, write JUnit XML here. Unset = no JUnit file (plain local run).
 JUNIT_XML ?=
@@ -41,7 +56,7 @@ endif
 help: ## Show this help message
 	@awk 'BEGIN {FS = ":.*?## "} /^[0-9a-zA-Z_-]+:.*?## / {printf "\033[36m%-24s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo ""
-	@echo "Variables: TEST_TYPE=smoke|core|full|<space-separated suite keys> (default full),"
+	@echo "Variables: TEST_TYPE=unit|integration|regression|trunk|<space-separated suite keys, e.g. smoke> (default regression),"
 	@echo "  MODEL_KEY (pytest -k filter, default all), PYTEST_ARGS (default '$(PYTEST_ARGS)'),"
 	@echo "  JUNIT_XML (single-suite targets only), RESULTS_DIR (default '$(RESULTS_DIR)')"
 
@@ -80,7 +95,7 @@ model-module-tests: ## Run oot_framework module tests (suite key: model_module; 
 	source "$$HOME/.bashrc"; \
 	source /etc/profile.d/ibm-aiu-setup.sh; \
 	set -e; \
-	_run_test=$$(uv run python3 -c \
+	_run_test=$$(uv run --active --no-sync python3 -c \
 	  "import oot_framework, os; print(os.path.join(os.path.dirname(oot_framework.__file__), 'run_test.sh'))"); \
 	configs="$(MODULE_CONFIG)"; \
 	if [[ -z "$$configs" ]]; then \
@@ -97,16 +112,24 @@ model-module-tests: ## Run oot_framework module tests (suite key: model_module; 
 	done; \
 	exit $$rc
 
-# Aggregate target: every suite named in TEST_TYPE (smoke|core|full|space-separated
-# keys), each writing its own flat JUnit file into RESULTS_DIR so a caller can glob
-# the whole directory in one ClickHouse push. One failing suite doesn't skip the
-# rest; the aggregate's exit code still reflects any failure.
+# Aggregate target: every suite named in TEST_TYPE (unit|integration|
+# regression|trunk|space-separated suite keys), each writing its own flat
+# JUnit file into RESULTS_DIR so a caller can glob the whole directory in one
+# ClickHouse push. One failing suite doesn't skip the rest; the aggregate's
+# exit code still reflects any failure.
 tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite)
-	case " $(TEST_TYPE) " in \
-	  *" full "*) suites="adapter_coverage smoke load token_compare embed_compare vlm model_module" ;; \
-	  *" core "*) suites="adapter_coverage load token_compare embed_compare vlm model_module" ;; \
-	  " smoke ") suites="smoke" ;; \
-	  *) suites="$(TEST_TYPE)" ;; \
+	@# Apply the shared default (empty -> regression) and pass literal tier
+	@# names / suite keys through unchanged -- same source of truth as
+	@# _test_matrix.yaml's resolve-test-type job, so `make tests TEST_TYPE=unit`
+	@# matches what CI runs for the "unit" tier via GHA.
+	resolved="$$(scripts/resolve_test_type.sh $(TEST_TYPE))"; \
+	case " $$resolved " in \
+	  *" regression "*|*" trunk "*) suites="adapter_coverage smoke load token_compare embed_compare vlm model_module" ;; \
+	  *" unit "*) suites="adapter_coverage load token_compare embed_compare vlm model_module" ;; \
+	  " integration ") suites="smoke" ;; \
+	  " perf ") suites="perf" ;; \
+	  " smoke ") echo "TEST_TYPE=smoke is not a valid tier -- use TEST_TYPE=integration to run the smoke suite alone, or include 'smoke' in a multi-suite combo (e.g. TEST_TYPE=\"smoke load\")."; exit 1 ;; \
+	  *) suites="$$resolved" ;; \
 	esac; \
 	mkdir -p "$(RESULTS_DIR)"; \
 	rc=0; \
@@ -120,7 +143,13 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	    embed_compare)    $(MAKE) embed-compare-tests     JUNIT_XML="$(RESULTS_DIR)/spyre-embed-compare-tests.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
 	    vlm)              $(MAKE) vlm-tests               JUNIT_XML="$(RESULTS_DIR)/spyre-vlm-e2e-tests.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
 	    model_module)     $(MAKE) model-module-tests      JUNIT_XML=1 RESULTS_DIR="$(RESULTS_DIR)" MODULE_CONFIG="$(MODULE_CONFIG)" || rc=1 ;; \
-	    *) echo "Unknown suite key '$$suite'. Valid: adapter_coverage smoke load token_compare embed_compare vlm model_module"; rc=1 ;; \
+	    perf)             printf '%s\n' \
+	                        '<?xml version="1.0" encoding="utf-8"?>' \
+	                        '<testsuites name="hf-adapters-perf">' \
+	                        '  <testsuite name="hf-adapters-perf" tests="0" skipped="0" failures="0" errors="0"/>' \
+	                        '</testsuites>' > "$(RESULTS_DIR)/report.xml"; \
+	                      echo "hf-adapters has no perf harness yet (scaffold stub): wrote placeholder $(RESULTS_DIR)/report.xml" ;; \
+	    *) echo "Unknown suite key '$$suite'. Valid: adapter_coverage smoke load token_compare embed_compare vlm model_module perf"; rc=1 ;; \
 	  esac; \
 	done; \
 	exit $$rc

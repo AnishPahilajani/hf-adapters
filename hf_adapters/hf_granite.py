@@ -26,11 +26,14 @@ Usage::
     outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
 """
 
+import torch
+
 from hf_adapters.hf_common import (
     get_backbone,
-    make_standard_gqa_block,
     pad_lm_head,
     prepare_rope_and_heads,
+    prepare_standard_gqa_blocks,
+    text_config,
 )
 
 
@@ -92,15 +95,13 @@ def _run_forward(
         cache_position,
     )
     logits = model.lm_head(h)
-    logits = logits / model.config.logits_scaling
-    return logits
+    return logits / text_config(model.config).logits_scaling
 
 
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to Granite 3.3 model in-place."""
     prepare_rope_and_heads(model)
     pad_lm_head(model)
-    model._spyre_compiled_blocks = [
-        make_standard_gqa_block(layer, True) for layer in get_backbone(model).layers
-    ]
-    model._spyre_compiled_norm = torch.compile(get_backbone(model).norm, dynamic=False)
+    backbone = get_backbone(model)
+    model._spyre_compiled_blocks = prepare_standard_gqa_blocks(backbone.layers, True)
+    model._spyre_compiled_norm = torch.compile(backbone.norm, dynamic=False)

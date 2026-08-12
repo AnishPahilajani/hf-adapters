@@ -647,3 +647,5 @@ RERANKER_MODELS = {
 }
 
 RERANKER_PATHS: list[str] = [m["path"] for m in RERANKER_MODELS.values()]
+# No per-adapter reduction for rerankers yet, so this equals RERANKER_PATHS -- kept separate so every category (see ALL_CAUSAL_PATHS et al.) follows the same pattern.
+ALL_RERANKER_PATHS: list[str] = list(RERANKER_PATHS)

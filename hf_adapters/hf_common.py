@@ -1161,23 +1161,23 @@ def get_model_dtype(model: nn.Module) -> torch.dtype:
     return torch.float16
 
 
-def _move_to_spyre_with_layout(model, dtype):
-    """Move all parameters and buffers to Spyre with row-major layout for 2D
-    matmul weights, except embedding weights which keep the default layout.
+def apply_spyre_layout_to_module(module, dtype):
+    """Reallocate a module's params/buffers on Spyre with the adapter's layout.
+
+    Extracted from :func:`_move_to_spyre_with_layout` so a *standalone* module
+    (e.g. one a module test builds from a YAML config) gets byte-identical
+    allocation to the adapter path: the same row-major ``[1, 0]`` dim_order on
+    2-D matmul weights and the same embedding exclusion. Duplicating those rules
+    in a test harness would let the two drift apart, so both call this.
+
+    A device layout is fixed at allocation time, so each parameter/buffer is
+    rebuilt via ``torch.empty(..., device_layout=...)`` and copied into. Moving an
+    already-allocated tensor keeps its default layout instead.
+
+    No-op unless ``DEVICE`` is spyre, so callers need no device guard of their
+    own; the module is then left on whatever device it is already on.
     """
-    # Propagate dtype to the precomputed RoPE module(s) so the freq cache
-    # matches the chosen weight dtype (avoids fp16/bf16 mismatch in
-    # apply_rope_matmul when dtype != fp16). Done before the CPU early-return so
-    # both the CPU and Spyre paths get it.
-    set_rope_dtype(model, dtype)
-
-    # Build the RoPE rotation cache on CPU now, before any device move. If left
-    # to its lazy first-forward build, the construction ops run inside the Spyre
-    # graph and corrupt the result (see prebuild_rope_cache). Harmless on CPU.
-    prebuild_rope_cache(model)
-
     if torch.device(DEVICE).type != "spyre":
-        model.to(dtype=dtype)
         return
 
     # Prime torch-spyre autoload before importing torch_spyre._C or calling
@@ -1187,7 +1187,7 @@ def _move_to_spyre_with_layout(model, dtype):
 
     from torch_spyre._C import SpyreTensorLayout  # type: ignore[import-not-found]
 
-    skip_layout_ptrs = _embedding_param_ids(model)
+    skip_layout_ptrs = _embedding_param_ids(module)
 
     def _alloc_on_spyre(t: torch.Tensor) -> torch.Tensor:
         # The row-major [1, 0] dim_order describes a 2-D permutation, so it only
@@ -1209,18 +1209,40 @@ def _move_to_spyre_with_layout(model, dtype):
         new.copy_(t.to(dtype))
         return new
 
-    for name, param in list(model.named_parameters()):
+    for name, param in list(module.named_parameters()):
         new = _alloc_on_spyre(param.data)
-        module_path, _, attr = name.rpartition(".")
-        owner = model.get_submodule(module_path) if module_path else model
+        submodule_path, _, attr = name.rpartition(".")
+        owner = module.get_submodule(submodule_path) if submodule_path else module
         setattr(owner, attr, nn.Parameter(new, requires_grad=False))
 
-    for name, buf in list(model.named_buffers()):
+    for name, buf in list(module.named_buffers()):
         new = _alloc_on_spyre(buf)
-        module_path, _, attr = name.rpartition(".")
-        owner = model.get_submodule(module_path) if module_path else model
+        submodule_path, _, attr = name.rpartition(".")
+        owner = module.get_submodule(submodule_path) if submodule_path else module
         persistent = attr not in owner._non_persistent_buffers_set
         owner.register_buffer(attr, new, persistent=persistent)
+
+
+def _move_to_spyre_with_layout(model, dtype):
+    """Move all parameters and buffers to Spyre with row-major layout for 2D
+    matmul weights, except embedding weights which keep the default layout.
+    """
+    # Propagate dtype to the precomputed RoPE module(s) so the freq cache
+    # matches the chosen weight dtype (avoids fp16/bf16 mismatch in
+    # apply_rope_matmul when dtype != fp16). Done before the CPU early-return so
+    # both the CPU and Spyre paths get it.
+    set_rope_dtype(model, dtype)
+
+    # Build the RoPE rotation cache on CPU now, before any device move. If left
+    # to its lazy first-forward build, the construction ops run inside the Spyre
+    # graph and corrupt the result (see prebuild_rope_cache). Harmless on CPU.
+    prebuild_rope_cache(model)
+
+    if torch.device(DEVICE).type != "spyre":
+        model.to(dtype=dtype)
+        return
+
+    apply_spyre_layout_to_module(model, dtype)
 
 
 def load_model_common(model_path, module, dtype=torch.float16, auto_model_cls=None):

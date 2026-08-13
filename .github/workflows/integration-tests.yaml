@@ -96,7 +96,7 @@ on:
       models:
         description: >-
           Space-separated list of model paths to restrict every matrix job
-          (smoke/load/token-compare/embed-compare/vision) to, e.g.
+          (smoke/load/token-compare/embed-compare/vision/reranker-compare) to, e.g.
           "Qwen/Qwen3-0.6B mistralai/Ministral-3-8B-Instruct-2512". Must match
           paths exactly as they appear in tests/model_registry.py -- any
           registered path works, not just the smallest-per-adapter default

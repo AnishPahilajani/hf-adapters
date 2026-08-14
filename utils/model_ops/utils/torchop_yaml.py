@@ -182,7 +182,12 @@ def sanitize_arg(
 
 
 # Ops whose tensor inputs should use Xavier init when dtype/rank also qualify.
-_XAVIER_OPS = {"torch.conv2d", "torch.bmm", "torch.matmul", "torch.nn.functional.linear"}
+_XAVIER_OPS = {
+    "torch.conv2d",
+    "torch.bmm",
+    "torch.matmul",
+    "torch.nn.functional.linear",
+}
 _XAVIER_DTYPES = {"torch.float16", "torch.float32", "torch.bfloat16"}
 
 

@@ -109,6 +109,8 @@ CAUSAL_LM_MODELS = {
         "path": "ibm-research/granite-4.1-20b",
         "adapter": "hf_granite_swa.py",
         "size": "20b",
+        # Not yet publicly accessible on the HF Hub -- drop this once the model ships.
+        "is_gated": True,
     },
     # hf_granite_vision.py
     "granite-vision": {

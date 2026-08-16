@@ -116,3 +116,5 @@ def test_report_does_not_redeclare_browser_top_global():
     assert 'data-theme="light"' in report
     assert "--ok:#3fb950" in report
     assert "--live:#58a6ff" in report
+    assert "w=Math.max(2" in report
+    assert "hitW=Math.max(24,w)" in report

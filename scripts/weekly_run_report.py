@@ -230,7 +230,7 @@ def make_report(
     return f"""<!doctype html>
 <html lang="en" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{title}</title><style>
-:root{{--bg:#0b1220;--surface:#111a2b;--panel:#172235;--ink:#e6edf7;--muted:#a8b3c7;--line:#344258;--section:#718096;--bar-text:#07111f;--tooltip-bg:#e6edf7;--tooltip-ink:#101828;--ok:#45bd68;--bad:#ef6666;--live:#76c7e8;--queued:#98a2b3}}
+:root{{--bg:#0d1117;--surface:#161b22;--panel:#21262d;--ink:#f0f6fc;--muted:#8b949e;--line:#30363d;--section:#6e7681;--bar-text:#0d1117;--tooltip-bg:#f0f6fc;--tooltip-ink:#0d1117;--ok:#3fb950;--bad:#f85149;--live:#58a6ff;--queued:#8b949e}}
 [data-theme="light"]{{--bg:#f7f8fa;--surface:#fff;--panel:#eef1f5;--ink:#172033;--muted:#667085;--line:#d0d5dd;--section:#667085;--bar-text:#101828;--tooltip-bg:#101828;--tooltip-ink:#fff}}
 *{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--ink);font:16px system-ui,sans-serif}}
 header{{padding:24px 28px 16px}}.title-row{{display:flex;align-items:center;justify-content:space-between;gap:18px}}h1{{font-size:22px;margin:0 0 6px}}a{{color:#79adff}}.meta{{color:var(--muted)}}#theme-toggle{{padding:7px 11px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--ink);font:inherit;cursor:pointer}}

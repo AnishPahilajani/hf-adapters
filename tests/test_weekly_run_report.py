@@ -114,3 +114,5 @@ def test_report_does_not_redeclare_browser_top_global():
     assert "Link copied to clipboard" in report
     assert 'data-theme="dark"' in report
     assert 'data-theme="light"' in report
+    assert "--ok:#3fb950" in report
+    assert "--live:#58a6ff" in report

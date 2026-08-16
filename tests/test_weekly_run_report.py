@@ -95,7 +95,7 @@ def test_report_does_not_redeclare_browser_top_global():
     assert "chartTop=104" in report
     assert "rotate(-35" in report
     assert "'text-anchor':'start'" in report
-    assert "example · run 1 · 2026-01-01" in report
+    assert "example · run 1 · snapshot 2026-01-01" in report
     assert "toLocaleTimeString" in report
     assert "Duration:" in report
     assert "formatDuration" in report
@@ -112,3 +112,5 @@ def test_report_does_not_redeclare_browser_top_global():
     assert "if(row.section_start)" in report
     assert "contextmenu" in report
     assert "Link copied to clipboard" in report
+    assert 'data-theme="dark"' in report
+    assert 'data-theme="light"' in report

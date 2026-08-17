@@ -10,6 +10,7 @@ which models are supported on Spyre.
 | Model | model\_type | head\_dim | D/2 | Stick Aligned | CPU Accurate | Spyre Compiles | Spyre Runs |
 |-------|-----------|---------|-----|--------------|-------------|---------------|-----------|
 | Qwen3 0.6B | qwen3 | 128 | 64 | Yes | Yes | Yes | Yes |
+| LFM2 350M | lfm2 | 64→128 | 64 | Yes (padded) | Yes | Yes | Yes |
 | Granite 3.3 8B | granite | 128 | 64 | Yes | Yes | Yes | Yes |
 | Granite 3.3 2B | granite | 64→128 | 64 | Yes (padded) | Yes | Yes | Yes |
 | Granite 4.0 1B Instruct | granitemoehybrid | 128 | 64 | Yes | Yes | Yes | Yes |
@@ -111,8 +112,8 @@ single-token decode path (seq_len=1), not an adapter issue.
 > adapter or verify a checkpoint, update *only* this file (and the badge
 > counts in README.md, noted below).
 
-**Coverage:** 31 adapters · 47 verified checkpoints · 10K+ compatible models.
-The 47 verified checkpoints above are 30 generative + 13 embedding + 4 vision-language.
+**Coverage:** 32 adapters · 48 verified checkpoints · 10K+ compatible models.
+The 48 verified checkpoints above are 31 generative + 13 embedding + 4 vision-language.
 `hf_siglip_vision` and `hf_pixtral_vision` are bare vision-tower components used by
 VLM adapters and are not included in the adapter count.
 Granite Vision 4.1 is verified both as a text backbone (generative) and as a full VLM.
@@ -141,6 +142,7 @@ pattern, norms, and weight layout.
 | hf\_granitemoehybrid.py | granitemoehybrid | 2 | Granite 4.0 Micro |
 | hf\_granite\_swa.py | granite\_swa | 1 | Granite 4.1 8B (unverified), Granite 4.1 20B |
 | hf\_smollm3.py | smollm3 | 1 | — |
+| hf\_lfm2.py | lfm2 | 1 | LFM2 700M/1.2B and dense LFM2 fine-tunes with hybrid convolution/attention layers |
 | hf\_gemma4.py | gemma4\_unified / gemma4 (dense) | 2 | Dense only. Not E2B/E4B (PLE) or 26B-A4B (MoE). |
 | hf\_gemma4\_mm.py | gemma4\_unified (multimodal) | 1 | Dense only. Not E2B/E4B (PLE) or 26B-A4B (MoE). |
 | hf\_gemma3.py | gemma3\_text / gemma3 (dense) | 2 | Gemma 3 4B/12B/27B (text decoder of the multimodal checkpoints); EmbeddingGemma (bidirectional embedder). Not Gemma 3n (PLE). |

@@ -1255,6 +1255,8 @@ def allocate_kv_caches(model, batch_size, max_cache_len, dtype, device=None):
     """
     if device is None:
         device = DEVICE
+    if allocator := getattr(model, "_spyre_cache_allocator", None):
+        return allocator(model, batch_size, max_cache_len, dtype, device)
     shapes = kv_cache_shapes(model)
     on_spyre = torch.device(device).type == "spyre"
 

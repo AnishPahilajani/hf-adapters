@@ -580,6 +580,42 @@ def pad_attention_heads(
     model._spyre_head_dim = padded_head_dim
 
 
+def pad_attention_heads_linear(
+    model, attentions, orig_head_dim, padded_head_dim, num_heads
+):
+    """Zero-pad standard ``q_proj``/``k_proj``/``v_proj``/``out_proj`` heads.
+
+    This is the non-RoPE MHA layout used by OPT, GPT-Neo, and SigLIP. All four
+    projections use per-head end-padding. The original attention scale remains
+    valid because the added Q/K dimensions are zero.
+    """
+    assert padded_head_dim > orig_head_dim, (
+        f"padded_head_dim ({padded_head_dim}) must exceed "
+        f"orig_head_dim ({orig_head_dim})"
+    )
+    assert (
+        padded_head_dim >= BLOCK_SIZE
+    ), f"padded_head_dim ({padded_head_dim}) must be >= BLOCK_SIZE ({BLOCK_SIZE})"
+
+    for attn in attentions:
+        attn.q_proj = _pad_proj_output_simple(
+            attn.q_proj, num_heads, orig_head_dim, padded_head_dim
+        )
+        attn.k_proj = _pad_proj_output_simple(
+            attn.k_proj, num_heads, orig_head_dim, padded_head_dim
+        )
+        attn.v_proj = _pad_proj_output_simple(
+            attn.v_proj, num_heads, orig_head_dim, padded_head_dim
+        )
+        attn.out_proj = _pad_proj_input_simple(
+            attn.out_proj, num_heads, orig_head_dim, padded_head_dim
+        )
+        if hasattr(attn, "head_dim"):
+            attn.head_dim = padded_head_dim
+
+    model._spyre_head_dim = padded_head_dim
+
+
 def pad_attention_heads_simple(
     model, layers, orig_head_dim, padded_head_dim, num_heads
 ):
@@ -1900,6 +1936,7 @@ def make_decoder_block(
     head_dim,
     scale,
     pre_ln=True,
+    query_scale=None,
 ):
     """Compiled causal-decoder block for non-RoPE (learned-abs-pos) models.
 
@@ -1917,7 +1954,9 @@ def make_decoder_block(
       - **MHA** — kv heads == attention heads, so no ``enable_gqa=True``;
       - **explicit ``scale``** and a configurable ``pre_ln`` LN placement
         (``True`` = norm before each sublayer, as in GPT-2 / BLOOM / OPT≥1.3B;
-        ``False`` = norm after, as in OPT-350m).
+        ``False`` = norm after, as in OPT-350m). ``query_scale`` optionally
+        applies the factor directly to Q before SDPA, preserving OPT's stock
+        floating-point operation order while using ``scale=1.0`` in SDPA.
 
     Block signature matches the decoder harness::
 
@@ -1944,7 +1983,10 @@ def make_decoder_block(
         h = attn_ln(hidden_states) if pre_ln else hidden_states
 
         bsz, seq_len, _ = h.shape
-        q = q_proj(h).view(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
+        q = q_proj(h)
+        if query_scale is not None:
+            q = q * query_scale
+        q = q.view(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
         k = k_proj(h).view(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
         v = v_proj(h).view(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
 
@@ -2285,9 +2327,6 @@ def encoder_backbone_forward(model, input_ids, attn_mask, position_ids, token_ty
 
 def prepare_rope_and_heads(model):
     cfg = text_config(model.config)
-    assert_spyre_dimensions(
-        cfg, model_name=getattr(cfg, "name_or_path", "") or "<unknown>"
-    )
     orig_head_dim = (
         getattr(cfg, "head_dim", None) or cfg.hidden_size // cfg.num_attention_heads
     )

@@ -21,7 +21,7 @@ test_suite_config:
           edits:
             modules:
               include: &id001
-                - name: MistralModel_b95f1163
+                - name: MistralModel_layer0
                   module_path: transformers.models.mistral.modeling_mistral.MistralModel
                   description: 'Module: transformers.models.mistral.modeling_mistral.MistralModel (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/mistral/modeling_mistral.py#L327)'
                   constructor_inputs:
@@ -77,7 +77,7 @@ test_suite_config:
                             dtype: torch.bfloat16
                             device: spyre
                             init: xavier
-                - name: MistralRotaryEmbedding_0af204ee
+                - name: MistralRotaryEmbedding_layer0
                   module_path: transformers.models.mistral.modeling_mistral.MistralRotaryEmbedding
                   description: 'Module: transformers.models.mistral.modeling_mistral.MistralRotaryEmbedding (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/mistral/modeling_mistral.py#L262)'
                   constructor_inputs:
@@ -251,7 +251,7 @@ test_suite_config:
                               dtype: torch.bfloat16
                               device: spyre
                               init: xavier
-                - name: MistralRMSNorm_4096
+                - name: MistralRMSNorm_layer0
                   module_path: transformers.models.mistral.modeling_mistral.MistralRMSNorm
                   description: 'Module: transformers.models.mistral.modeling_mistral.MistralRMSNorm (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/mistral/modeling_mistral.py#L181)'
                   constructor_inputs:
@@ -399,7 +399,7 @@ test_suite_config:
                               dtype: torch.bfloat16
                               device: spyre
                               init: xavier
-                - name: MistralMLP_f82d9546
+                - name: MistralMLP_layer0
                   module_path: transformers.models.mistral.modeling_mistral.MistralMLP
                   description: 'Module: transformers.models.mistral.modeling_mistral.MistralMLP (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/mistral/modeling_mistral.py#L35)'
                   constructor_inputs:
@@ -433,7 +433,7 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: SiLUActivation_d2f532e9
+                - name: SiLUActivation_layer0
                   module_path: transformers.activations.SiLUActivation
                   description: 'Module: transformers.activations.SiLUActivation (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/activations.py#L92)'
                   constructor_inputs:

@@ -50,6 +50,7 @@ from transformers import (
     AutoModelForQuestionAnswering,
     AutoModelForSequenceClassification,
     BertConfig,
+    Gemma2Config,
     Gemma3Config,
     Gemma3TextConfig,
     Gemma4Config,
@@ -89,6 +90,7 @@ from hf_adapters import (
     hf_dspark_gemma4,
     hf_dspark_granite,
     hf_dspark_qwen3,
+    hf_gemma2,
     hf_gemma3,
     hf_gemma4,
     hf_gemma4_mm,
@@ -127,6 +129,7 @@ from hf_adapters.hf_common import (
 
 CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     BertConfig: hf_bert,
+    Gemma2Config: hf_gemma2,
     Gemma3Config: hf_gemma3,
     Gemma3TextConfig: hf_gemma3,
     Gemma4Config: hf_gemma4,

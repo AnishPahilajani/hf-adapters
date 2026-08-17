@@ -12,9 +12,8 @@ which models are supported on Spyre.
 | Qwen3 0.6B | qwen3 | 128 | 64 | Yes | Yes | Yes | Yes |
 | Granite 3.3 8B | granite | 128 | 64 | Yes | Yes | Yes | Yes |
 | Granite 3.3 2B | granite | 64→128 | 64 | Yes (padded) | Yes | Yes | Yes |
-| Granite 4.0 1B Base | granitemoehybrid | 128 | 64 | Yes | Yes | Yes | Yes |
 | Granite 4.0 1B Instruct | granitemoehybrid | 128 | 64 | Yes | Yes | Yes | Yes |
-| Granite 4.1 20B (bf16) | granite_swa | 128 | 64 | Yes | Yes | Yes | Yes |
+| Granite 4.1 20B | granite_swa | 128 | 64 | Yes | Yes | Yes | Yes |
 | SmolLM3 3B | smollm3 | 128 | 64 | Yes | Yes | Yes | Yes |
 | Llama 3.2 3B | llama | 128 | 64 | Yes | Yes | Yes | Yes |
 | TinyLlama 1.1B | llama | 64→128 | 64 | Yes (padded) | Yes | Yes | Yes |
@@ -30,7 +29,9 @@ which models are supported on Spyre.
 | Yi 1.5 6B | llama | 128 | 64 | Yes | Yes | Yes | Yes |
 | Granite Vision 4.1 4B (text backbone) | granite (text) | 64→128 | 64 | Yes (padded) | Yes | Yes | Yes |
 | Gemma 4 12B | gemma4\_unified | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
+| Gemma 4 31B | gemma4\_unified | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
 | Gemma 3 1B | gemma3\_text | 256 | 128 | Yes | Yes | Yes | Yes |
+| Gemma 2 2B | gemma2 | 256 | 128 | Yes | Yes | Yes | Yes |
 | GPT-2 124M | gpt2 | 64 | n/a (no RoPE) | Yes | Yes | Yes | Yes |
 | GPT-Neo 125M | gpt_neo | 64 | n/a (no RoPE) | Yes | Yes | Yes | Yes |
 | OPT 125M | opt | 64 | n/a (no RoPE) | Yes | Yes | Yes | Yes |
@@ -43,8 +44,6 @@ which models are supported on Spyre.
 **Spyre Compiles** = `torch.compile(block_forward)` succeeds on Spyre.
 **Spyre Runs** = block produces output (no crash/NaN).
 
-Unless a row notes otherwise (e.g. `(bf16)`), **verified means verified in fp16** — this holds even for bf16-native checkpoints. A bf16-native model that is only verified in fp16 may behave differently in bf16 on Spyre (and vice versa); the dtype actually tested is what the table certifies.
-
 ### Vision-Language (image→text)
 
 Full multimodal VLMs: a vision tower (image → patch features) plus a causal text
@@ -56,8 +55,8 @@ CPU (see Multimodal VLM Path below).
 |-------|-----------|--------|-----------|--------------|-------------|---------------|-----------|
 | Granite Vision 4.1 4B | granite4\_vision | SigLIP vision + Granite text | Yes (padded) | Yes | Yes | Yes |
 | Mistral-Small-3.1-24B-Instruct-2503 | mistral3 | Pixtral + Mistral text | Yes (padded) | Yes | Yes | Yes |
-| Ministral-3-14B-Instruct-2512 (bf16) | mistral3 | Pixtral + Ministral3 text | Yes (padded) | Yes | Yes | Yes |
-| Gemma 4 12B (bf16) | gemma4\_unified | Encoder-free vision embedder + Gemma 4 text | Yes | Yes | Yes | Yes |
+| Ministral-3-14B-Instruct-2512 | mistral3 | Pixtral + Ministral3 text | Yes (padded) | Yes | Yes | Yes |
+| Gemma 4 12B | gemma4\_unified | Encoder-free vision embedder + Gemma 4 text | Yes | Yes | Yes | Yes |
 
 **CPU Accurate** = adapter `generate` matches stock `model.generate` token-for-token on CPU (`test_vlm_e2e_cpu.py`).
 **Spyre Runs** = `test_vlm_e2e_spyre.py` drives the adapter teacher-forced on stock's tokens and asserts per-step logit cosine ≥ 0.999 vs the CPU reference over prefill + decode steps (top-1 agreement is reported, not asserted — an open-ended caption hits near-ties where the fp16-substrate winner is numerically arbitrary; see Multimodal VLM Path). granite-vision-4.1 holds cosine ≥ 0.99991 at every step and produces a correct, coherent caption. Gemma 4 12B runs in **bf16** (like the rest of the Gemma family, it overflows its residual stream in fp16) and holds cosine ≥ 0.99964 at every step with 5/5 top-1 agreement, producing a caption byte-identical to stock.
@@ -112,10 +111,10 @@ single-token decode path (seq_len=1), not an adapter issue.
 > adapter or verify a checkpoint, update *only* this file (and the badge
 > counts in README.md, noted below).
 
-**Coverage:** 29 adapters · 46 verified checkpoints · 100+ compatible models.
-The 46 verified rows are 29 generative + 13 embedding + 4 vision-language (see the
-Verified Checkpoints tables above). `hf_siglip_vision` and `hf_pixtral_vision` are
-vision-tower components used by VLM adapters rather than standalone model adapters.
+**Coverage:** 31 adapters · 47 verified checkpoints · 10K+ compatible models.
+The 47 verified checkpoints above are 30 generative + 13 embedding + 4 vision-language.
+`hf_siglip_vision` and `hf_pixtral_vision` are bare vision-tower components used by
+VLM adapters and are not included in the adapter count.
 Granite Vision 4.1 is verified both as a text backbone (generative) and as a full VLM.
 `hf_mistral3_vision_mm` covers both the ``mistral`` text-backbone variant
 (Mistral-Small-3.1/3.2) and the ``ministral3`` variant (Ministral-3-14B-Instruct-2512,
@@ -142,9 +141,10 @@ pattern, norms, and weight layout.
 | hf\_granitemoehybrid.py | granitemoehybrid | 2 | Granite 4.0 Micro |
 | hf\_granite\_swa.py | granite\_swa | 1 | Granite 4.1 8B (unverified), Granite 4.1 20B |
 | hf\_smollm3.py | smollm3 | 1 | — |
-| hf\_gemma4.py | gemma4\_unified / gemma4 (dense) | 1 | Gemma 4 31B (dense). Not E2B/E4B (PLE) or 26B-A4B (MoE). |
-| hf\_gemma4\_mm.py | gemma4\_unified (multimodal) | 1 | Gemma 4 31B (dense unified VLM). Not E2B/E4B (PLE) or 26B-A4B (MoE). |
+| hf\_gemma4.py | gemma4\_unified / gemma4 (dense) | 2 | Dense only. Not E2B/E4B (PLE) or 26B-A4B (MoE). |
+| hf\_gemma4\_mm.py | gemma4\_unified (multimodal) | 1 | Dense only. Not E2B/E4B (PLE) or 26B-A4B (MoE). |
 | hf\_gemma3.py | gemma3\_text / gemma3 (dense) | 2 | Gemma 3 4B/12B/27B (text decoder of the multimodal checkpoints); EmbeddingGemma (bidirectional embedder). Not Gemma 3n (PLE). |
+| hf\_gemma2.py | gemma2 | 1 | Gemma 2 9B and Gemma 2 fine-tunes. |
 | hf\_olmo.py | olmo | 1 | OLMo 7B |
 | hf\_olmo2.py | olmo2 | 1 | OLMo 2 7B |
 | hf\_gpt2.py | gpt2 | 1 | GPT-2 medium/large/xl, DistilGPT-2, Cerebras-GPT (111M–6.7B) |

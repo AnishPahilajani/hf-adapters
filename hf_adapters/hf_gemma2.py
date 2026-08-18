@@ -206,6 +206,10 @@ def prepare_for_spyre(model):
     """Apply Gemma 2 adaptations to ``model`` in-place."""
     backbone = get_backbone(model)
     cfg = model.config
+    assert (
+        getattr(cfg, "is_causal", True) is not True
+    ), "Gemma 2 adapter only supports causal attention"
+
     head_dim = cfg.head_dim
     num_q_heads = cfg.num_attention_heads
     num_kv_heads = cfg.num_key_value_heads

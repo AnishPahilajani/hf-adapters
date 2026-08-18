@@ -135,6 +135,7 @@ def prepare_for_spyre(model):
         )
 
     pad_lm_head(model)
+    model._spyre_max_position_embeddings = cfg.max_position_embeddings
     model._spyre_kv_shapes = [
         (num_heads, padded_head_dim, padded_head_dim)
         for _ in range(cfg.num_hidden_layers)

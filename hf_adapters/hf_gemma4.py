@@ -293,7 +293,17 @@ def _compile_gemma4_block_stages(block):
             apply_rope_matmul(k, selected_freqs),
         )
 
-    def attend(q, k, v, attn_mask, key_cache, value_cache, cache_index):
+    def complete_block(
+        hidden_states,
+        q,
+        k,
+        v,
+        attn_mask,
+        key_cache,
+        value_cache,
+        cache_index,
+        layer_scalar,
+    ):
         key_cache, value_cache = kv_cache_update(
             k, v, key_cache, value_cache, cache_index
         )
@@ -307,26 +317,25 @@ def _compile_gemma4_block_stages(block):
             enable_gqa=True,
         )
         attn_out = attn_out.transpose(1, 2).reshape(q.shape[0], q.shape[2], -1)
-        return attn.o_proj(attn_out), key_cache, value_cache
+        attn_out = attn.o_proj(attn_out)
 
-    def finish(hidden_states, attn_out, layer_scalar):
         h = hidden_states + block.post_attention_layernorm(attn_out)
         residual = h
         h = block.pre_feedforward_layernorm(h)
         h = block.mlp(h)
         h = block.post_feedforward_layernorm(h)
-        return (residual + h) * layer_scalar
+        return (residual + h) * layer_scalar, key_cache, value_cache
 
     return tuple(
         torch.compile(stage, dynamic=False)
-        for stage in (project_norm, apply_rope, attend, finish)
+        for stage in (project_norm, apply_rope, complete_block)
     )
 
 
 def prepare_gemma4_blocks(
     layers, num_q_heads_per_layer, kv_shapes, is_kv_eq_v_per_layer
 ):
-    """Replace Gemma 4 decoder layers and compile each into four stages."""
+    """Replace Gemma 4 decoder layers and compile each into three stages."""
     blocks = []
     for i, layer in enumerate(list(layers)):
         block = Gemma4Block(
@@ -423,10 +432,14 @@ def _run_blocks_over_embeds(
     backbone_layers = backbone.layers
     for i, compiled_stages in enumerate(model._spyre_compiled_blocks):
         lt = cfg.layer_types[i]
-        project_norm, apply_rope, attend, finish = compiled_stages
+        project_norm, apply_rope, complete_block = compiled_stages
         q, k, v = project_norm(h)
         q, k = apply_rope(q, k, freqs[lt])
-        attn_out, key_caches[i], value_caches[i] = attend(
+        # Pass the per-layer scalar as a tensor read fresh from the registered,
+        # device-moved block — NOT as a Python float — so Dynamo guards on tensor
+        # metadata instead of recompiling for each distinct learned value.
+        h, key_caches[i], value_caches[i] = complete_block(
+            h,
             q,
             k,
             v,
@@ -434,11 +447,8 @@ def _run_blocks_over_embeds(
             key_caches[i],
             value_caches[i],
             cache_index,
+            backbone_layers[i].layer_scalar,
         )
-        # Pass the per-layer scalar as a tensor read fresh from the registered,
-        # device-moved block — NOT as a Python float — so Dynamo guards on tensor
-        # metadata instead of recompiling for each distinct learned value.
-        h = finish(h, attn_out, backbone_layers[i].layer_scalar)
 
     h = backbone.norm(h)
     return h

@@ -96,4 +96,16 @@ def load_hf_model(model_path, dtype):
 
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to a Mistral-3-family model in-place."""
+
+    try:
+        from torch_spyre._inductor import (  # type: ignore[import-not-found]
+            config as spyre_config,
+        )
+
+        # Bundle-scoped HBM pool planning in torch-spyre d9c0301 corrupts
+        # Ministral outputs. Keep this disabled through lazy compilation.
+        setattr(spyre_config, "hbm_pool_planning", False)
+    except ImportError:
+        pass
+
     prepare_standard_gqa(model)

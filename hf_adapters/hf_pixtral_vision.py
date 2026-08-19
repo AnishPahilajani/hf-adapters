@@ -377,7 +377,7 @@ def prepare_for_spyre(model):
     head_dim = padded_head_dim
 
     # Snapshot the CPU patch-embed closure (Conv2d + ln_pre; keeps working on
-    # CPU after _move_to_spyre_with_layout relocates the tower's params).
+    # CPU after the device move relocates the tower's params).
     model._spyre_pixtral_patch_embed = _make_patch_embed_fn(tower)
 
     # Snapshot the 2D RoPE inv_freq table on CPU — used in prefill_vision_tower

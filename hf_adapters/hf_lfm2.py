@@ -77,6 +77,22 @@ def _causal_depthwise_conv(
 ):
     """Apply LFM2's three-tap causal convolution using stick-aligned tensors."""
     seq_len = hidden_states.shape[-1]
+    state_len = state.shape[-1]
+
+    if is_prefill and seq_len > state_len:
+        assert seq_len % state_len == 0
+        outputs = []
+        new_state = state
+        for start in range(0, seq_len, state_len):
+            out, new_state = _causal_depthwise_conv(
+                hidden_states[..., start : start + state_len],
+                new_state,
+                weights,
+                shift_matrices,
+                bias,
+            )
+            outputs.append(out)
+        return torch.cat(outputs, dim=-1), new_state
 
     def mask(predicate):
         positions = torch.arange(seq_len)
@@ -185,7 +201,7 @@ def _make_conv_block(layer):
     conv._spyre_shift_matrices = nn.ParameterList(
         [
             nn.Parameter(torch.roll(identity, shift, dims=1), requires_grad=False)
-            for shift in range(BLOCK_SIZE)
+            for shift in range(BLOCK_SIZE + 2)
         ]
         + [nn.Parameter(torch.roll(identity, -1, dims=1), requires_grad=False)]
     )

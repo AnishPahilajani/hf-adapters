@@ -207,7 +207,7 @@ def prepare_for_spyre(model):
     backbone = get_backbone(model)
     cfg = model.config
     assert (
-        getattr(cfg, "is_causal", True) is not True
+        getattr(cfg, "is_causal", True) is True
     ), "Gemma 2 adapter only supports causal attention"
 
     head_dim = cfg.head_dim

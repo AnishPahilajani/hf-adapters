@@ -52,9 +52,7 @@ def _make_compiled_block(layer, num_q_heads, num_kv_heads, head_dim):
         attn_mask,
         key_cache,
         value_cache,
-        is_filling,
-        token_index,
-        cache_position,
+        cache_index,
     ):
         residual = hidden_states
         h = input_ln(hidden_states)
@@ -72,9 +70,7 @@ def _make_compiled_block(layer, num_q_heads, num_kv_heads, head_dim):
             v,
             key_cache,
             value_cache,
-            is_filling,
-            token_index,
-            cache_position,
+            cache_index,
         )
 
         # Keep each KV head's query group in a separate 4-D BMM. Materializing
@@ -121,9 +117,7 @@ def _run_backbone_forward(
     attn_mask,
     key_caches,
     value_caches,
-    is_filling,
-    token_index,
-    cache_position,
+    cache_index,
 ):
     backbone = get_backbone(model)
     cfg = model.config
@@ -131,7 +125,7 @@ def _run_backbone_forward(
     selected_freqs = model._spyre_rope(h, position_ids)
 
     batch_size, seq_len = input_ids.shape
-    block_base = cache_position - token_index
+    block_base = int(cache_index[0])
     query_coords = (torch.arange(seq_len)[None, :] + block_base).expand(
         batch_size, seq_len
     )
@@ -165,9 +159,7 @@ def _run_backbone_forward(
             masks[cfg.layer_types[i]],
             key_caches[i],
             value_caches[i],
-            is_filling,
-            token_index,
-            cache_position,
+            cache_index,
         )
 
     return backbone.norm(h)
@@ -180,9 +172,7 @@ def _run_forward(
     attn_mask,
     key_caches,
     value_caches,
-    is_filling,
-    token_index,
-    cache_position,
+    cache_index,
 ):
     h = _run_backbone_forward(
         model,
@@ -191,9 +181,7 @@ def _run_forward(
         attn_mask,
         key_caches,
         value_caches,
-        is_filling,
-        token_index,
-        cache_position,
+        cache_index,
     )
     logits = model.lm_head(h)[..., : model._spyre_original_vocab_size]
     cap = model.config.final_logit_softcapping

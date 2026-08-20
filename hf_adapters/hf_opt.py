@@ -52,9 +52,7 @@ def _run_backbone_forward(
     attn_mask,
     key_caches,
     value_caches,
-    is_filling,
-    token_index,
-    cache_position,
+    cache_index,
 ):
     decoder = get_backbone(model).decoder
     h = decoder.embed_tokens(input_ids)
@@ -69,9 +67,7 @@ def _run_backbone_forward(
             attn_mask,
             key_caches[i],
             value_caches[i],
-            is_filling,
-            token_index,
-            cache_position,
+            cache_index,
         )
 
     if decoder.final_layer_norm is not None:
@@ -88,9 +84,7 @@ def _run_forward(
     attn_mask,
     key_caches,
     value_caches,
-    is_filling,
-    token_index,
-    cache_position,
+    cache_index,
 ):
     h = _run_backbone_forward(
         model,
@@ -99,9 +93,7 @@ def _run_forward(
         attn_mask,
         key_caches,
         value_caches,
-        is_filling,
-        token_index,
-        cache_position,
+        cache_index,
     )
     logits = model.lm_head(h)
     return logits[..., : model.config.vocab_size]
@@ -135,7 +127,6 @@ def prepare_for_spyre(model):
         )
 
     pad_lm_head(model)
-    model._spyre_max_position_embeddings = cfg.max_position_embeddings
     model._spyre_kv_shapes = [
         (num_heads, padded_head_dim, padded_head_dim)
         for _ in range(cfg.num_hidden_layers)

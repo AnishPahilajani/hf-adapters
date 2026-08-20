@@ -27,6 +27,7 @@ from hf_adapters.hf_common import (
     BLOCK_SIZE,
     DEVICE,
     PrecomputedRotaryEmbedding,
+    allocate_kv_cache_tensor,
     apply_rope_matmul,
     get_backbone,
     kv_cache_update,
@@ -70,16 +71,16 @@ def _causal_depthwise_conv(
     hidden_states,
     state,
     weights,
+    decode_weights,
     shift_matrices,
+    decode_matrices,
     bias=None,
-    is_prefill=True,
-    token_index=0,
 ):
-    """Apply LFM2's three-tap causal convolution using stick-aligned tensors."""
+    """Apply LFM2's three-tap causal convolution using stick-aligned state."""
     seq_len = hidden_states.shape[-1]
     state_len = state.shape[-1]
 
-    if is_prefill and seq_len > state_len:
+    if seq_len > state_len:
         assert seq_len % state_len == 0
         outputs = []
         new_state = state
@@ -88,21 +89,28 @@ def _causal_depthwise_conv(
                 hidden_states[..., start : start + state_len],
                 new_state,
                 weights,
+                decode_weights,
                 shift_matrices,
+                decode_matrices,
                 bias,
             )
             outputs.append(out)
         return torch.cat(outputs, dim=-1), new_state
 
-    def mask(predicate):
-        positions = torch.arange(seq_len)
-        return predicate(positions)[None, None, :].to(
+    if seq_len == 1:
+        previous_2 = state @ decode_matrices[0]
+        previous_1 = state @ decode_matrices[1]
+        new_state = state @ decode_matrices[2] + hidden_states @ decode_matrices[3]
+    else:
+        if seq_len < state_len:
+            hidden_states = F.pad(hidden_states, (state_len - seq_len, 0))
+        positions = torch.arange(state_len)
+        from_state_1 = (positions == 0)[None, None, :].to(
             dtype=hidden_states.dtype, device=hidden_states.device
         )
-
-    if is_prefill:
-        from_state_1 = mask(lambda positions: positions == 0)
-        from_state_2 = mask(lambda positions: positions < 2)
+        from_state_2 = (positions < 2)[None, None, :].to(
+            dtype=hidden_states.dtype, device=hidden_states.device
+        )
         previous_1 = from_state_1 * (state @ shift_matrices[1]) + (1 - from_state_1) * (
             hidden_states @ shift_matrices[1]
         )
@@ -110,19 +118,17 @@ def _causal_depthwise_conv(
             hidden_states @ shift_matrices[2]
         )
         new_state = hidden_states
-    else:
-        active = mask(lambda positions: positions == token_index)
-        previous_1 = active * (state @ shift_matrices[token_index + 1])
-        previous_2 = active * (state @ shift_matrices[token_index + 2])
-        shifted_input = hidden_states @ shift_matrices[seq_len - 1 - token_index]
-        keep = mask(lambda positions: positions != seq_len - 1)
-        new_state = keep * (state @ shift_matrices[-1]) + (1 - keep) * shifted_input
 
-    out = weights[0] * previous_2 + weights[1] * previous_1 + weights[2] * hidden_states
+    active_weights = decode_weights if seq_len == 1 else weights
+    out = (
+        active_weights[0] * previous_2
+        + active_weights[1] * previous_1
+        + active_weights[2] * hidden_states
+    )
     if bias is not None:
         out = out + bias[None, :, None]
-    if not is_prefill:
-        out = active * out
+    if seq_len < state_len and seq_len != 1:
+        out = out[..., -seq_len:]
     return out.to(hidden_states.dtype), new_state
 
 
@@ -138,9 +144,7 @@ def _make_attention_block(layer):
         attn_mask,
         key_cache,
         value_cache,
-        is_filling,
-        token_index,
-        cache_position,
+        cache_index,
     ):
         residual = hidden_states
         h = operator_norm(hidden_states)
@@ -160,9 +164,7 @@ def _make_attention_block(layer):
             v,
             key_cache,
             value_cache,
-            is_filling,
-            token_index,
-            cache_position,
+            cache_index,
         )
 
         h = F.scaled_dot_product_attention(
@@ -198,12 +200,27 @@ def _make_conv_block(layer):
         ]
     )
     identity = torch.eye(BLOCK_SIZE, dtype=conv.conv.weight.dtype)
+    conv._spyre_decode_weights = nn.ParameterList(
+        [
+            nn.Parameter(conv.conv.weight[:, 0, i][None, :, None], requires_grad=False)
+            for i in range(3)
+        ]
+    )
     conv._spyre_shift_matrices = nn.ParameterList(
         [
             nn.Parameter(torch.roll(identity, shift, dims=1), requires_grad=False)
-            for shift in range(BLOCK_SIZE + 2)
+            for shift in range(3)
         ]
-        + [nn.Parameter(torch.roll(identity, -1, dims=1), requires_grad=False)]
+    )
+    shift_state = torch.roll(identity, -1, dims=1)
+    shift_state[0, -1] = 0
+    conv._spyre_decode_matrices = nn.ParameterList(
+        [
+            nn.Parameter(identity[:, -2:-1], requires_grad=False),
+            nn.Parameter(identity[:, -1:], requires_grad=False),
+            nn.Parameter(shift_state, requires_grad=False),
+            nn.Parameter(identity[-1:, :], requires_grad=False),
+        ]
     )
     ffn_norm = layer.ffn_norm
     feed_forward = layer.feed_forward
@@ -212,17 +229,21 @@ def _make_conv_block(layer):
         h = operator_norm(hidden_states)
         h = h * padding_mask[:, :, None]
         B, C, x = conv.in_proj(h).transpose(1, 2).chunk(3, dim=1)
-        return (B * x).contiguous(), C.contiguous()
+        conv_input = (B * x).contiguous()
+        if conv_input.shape[-1] == 1:
+            conv_input = conv_input[..., -1:]
+            C = C[..., -1:]
+        return conv_input, C.contiguous()
 
-    def conv_forward(conv_input, conv_state, is_prefill, token_index):
+    def conv_forward(conv_input, conv_state):
         conv_out, new_state = _causal_depthwise_conv(
             conv_input,
             conv_state,
             conv._spyre_weights,
+            conv._spyre_decode_weights,
             conv._spyre_shift_matrices,
+            conv._spyre_decode_matrices,
             conv.conv.bias,
-            is_prefill,
-            token_index,
         )
         conv_state.copy_(new_state)
         return conv_out, conv_state
@@ -242,9 +263,9 @@ def _make_conv_block(layer):
     )
 
 
-def _padding_mask(attn_mask, seq_len, is_filling, token_index, cache_position):
+def _padding_mask(attn_mask, seq_len, cache_index):
     """Recover per-query input validity from the additive causal mask."""
-    block_start = cache_position - token_index if is_filling else cache_position
+    block_start = int(cache_index[0])
     rows = torch.arange(seq_len)
     diagonal = attn_mask.to("cpu")[:, 0, rows, block_start + rows]
     return (diagonal == 0).to(dtype=attn_mask.dtype, device=DEVICE)
@@ -257,16 +278,12 @@ def _run_backbone_forward(
     attn_mask,
     key_caches,
     value_caches,
-    is_filling,
-    token_index,
-    cache_position,
+    cache_index,
 ):
     backbone = get_backbone(model)
     h = backbone.embed_tokens(input_ids)
     selected_freqs = model._spyre_rope(h, position_ids)
-    padding_mask = _padding_mask(
-        attn_mask, h.shape[1], is_filling, token_index, cache_position
-    )
+    padding_mask = _padding_mask(attn_mask, h.shape[1], cache_index)
 
     for i, (layer_type, compiled_block) in enumerate(
         zip(model.config.layer_types, model._spyre_compiled_blocks)
@@ -278,21 +295,12 @@ def _run_backbone_forward(
                 attn_mask,
                 key_caches[i],
                 value_caches[i],
-                is_filling,
-                token_index,
-                cache_position,
+                cache_index,
             )
         else:
             pre_conv, conv_forward, post_conv = compiled_block
-            is_prefill = not is_filling and cache_position == 0
-            conv_token_index = token_index if is_filling else 0
             conv_input, C = pre_conv(h, padding_mask)
-            conv_out, key_caches[i] = conv_forward(
-                conv_input,
-                key_caches[i],
-                is_prefill,
-                conv_token_index,
-            )
+            conv_out, key_caches[i] = conv_forward(conv_input, key_caches[i])
             h = post_conv(h, C, conv_out)
 
     return backbone.embedding_norm(h)
@@ -305,9 +313,7 @@ def _run_forward(
     attn_mask,
     key_caches,
     value_caches,
-    is_filling,
-    token_index,
-    cache_position,
+    cache_index,
 ):
     h = _run_backbone_forward(
         model,
@@ -316,9 +322,7 @@ def _run_forward(
         attn_mask,
         key_caches,
         value_caches,
-        is_filling,
-        token_index,
-        cache_position,
+        cache_index,
     )
     return model.lm_head(h)
 
@@ -331,16 +335,25 @@ def _allocate_caches(model, batch_size, max_cache_len, dtype, device):
     for layer_type in cfg.layer_types:
         if layer_type == "full_attention":
             key_caches.append(
-                torch.zeros(
+                allocate_kv_cache_tensor(
                     batch_size,
                     cfg.num_key_value_heads,
                     max_cache_len,
                     head_dim,
-                    dtype=dtype,
-                    device=device,
+                    dtype,
+                    device,
                 )
             )
-            value_caches.append(torch.zeros_like(key_caches[-1]))
+            value_caches.append(
+                allocate_kv_cache_tensor(
+                    batch_size,
+                    cfg.num_key_value_heads,
+                    max_cache_len,
+                    head_dim,
+                    dtype,
+                    device,
+                )
+            )
         else:
             key_caches.append(
                 torch.zeros(

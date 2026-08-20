@@ -1236,6 +1236,33 @@ def make_cache_index(start, length, device=None):
     return idx.to(device) if device is not None else idx
 
 
+def allocate_kv_cache_tensor(
+    batch_size, num_kv_heads, max_cache_len, head_dim, dtype, device=None
+):
+    """Allocate one zeroed KV tensor with a scatter-ready device layout."""
+    if device is None:
+        device = DEVICE
+    on_spyre = torch.device(device).type == "spyre"
+    stl = (
+        _cache_position_first_stl(
+            batch_size, num_kv_heads, max_cache_len, head_dim, dtype
+        )
+        if on_spyre
+        else None
+    )
+    shape = (batch_size, num_kv_heads, max_cache_len, head_dim)
+    if stl is None:
+        return torch.zeros(shape, dtype=dtype, device=device)
+    cache: torch.Tensor = torch.empty(  # type: ignore[call-overload]
+        shape,
+        device=torch.device(device),
+        device_layout=stl,
+        dtype=dtype,
+    )
+    cache.zero_()
+    return cache
+
+
 def allocate_kv_caches(model, batch_size, max_cache_len, dtype, device=None):
     """Allocate zeroed per-layer key/value caches with a scatter-ready device layout.
 
@@ -1258,28 +1285,14 @@ def allocate_kv_caches(model, batch_size, max_cache_len, dtype, device=None):
     if allocator := getattr(model, "_spyre_cache_allocator", None):
         return allocator(model, batch_size, max_cache_len, dtype, device)
     shapes = kv_cache_shapes(model)
-    on_spyre = torch.device(device).type == "spyre"
-
-    def _alloc(n_kv, head_dim):
-        stl = (
-            _cache_position_first_stl(batch_size, n_kv, max_cache_len, head_dim, dtype)
-            if on_spyre
-            else None
-        )
-        shape = (batch_size, n_kv, max_cache_len, head_dim)
-        if stl is None:
-            return torch.zeros(shape, dtype=dtype, device=device)
-        cache: torch.Tensor = torch.empty(  # type: ignore[call-overload]
-            shape,
-            device=torch.device(device),
-            device_layout=stl,
-            dtype=dtype,
-        )
-        cache.zero_()
-        return cache
-
-    key_caches = [_alloc(n_kv, hd) for (n_kv, hd, _vhd) in shapes]
-    value_caches = [_alloc(n_kv, vhd) for (n_kv, _hd, vhd) in shapes]
+    key_caches = [
+        allocate_kv_cache_tensor(batch_size, n_kv, max_cache_len, hd, dtype, device)
+        for (n_kv, hd, _vhd) in shapes
+    ]
+    value_caches = [
+        allocate_kv_cache_tensor(batch_size, n_kv, max_cache_len, vhd, dtype, device)
+        for (n_kv, _hd, vhd) in shapes
+    ]
     return key_caches, value_caches
 
 

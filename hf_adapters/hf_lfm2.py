@@ -71,14 +71,17 @@ def _causal_depthwise_conv(
     hidden_states,
     state,
     weights,
-    decode_weights,
     shift_matrices,
     decode_matrices,
     bias=None,
+    decode=None,
 ):
     """Apply LFM2's three-tap causal convolution using stick-aligned state."""
     seq_len = hidden_states.shape[-1]
+    input_seq_len = seq_len
     state_len = state.shape[-1]
+    if decode is None:
+        decode = seq_len == 1
 
     if seq_len > state_len:
         assert seq_len % state_len == 0
@@ -89,7 +92,6 @@ def _causal_depthwise_conv(
                 hidden_states[..., start : start + state_len],
                 new_state,
                 weights,
-                decode_weights,
                 shift_matrices,
                 decode_matrices,
                 bias,
@@ -97,7 +99,7 @@ def _causal_depthwise_conv(
             outputs.append(out)
         return torch.cat(outputs, dim=-1), new_state
 
-    if seq_len == 1:
+    if decode:
         previous_2 = state @ decode_matrices[0]
         previous_1 = state @ decode_matrices[1]
         new_state = state @ decode_matrices[2] + hidden_states @ decode_matrices[3]
@@ -119,16 +121,11 @@ def _causal_depthwise_conv(
         )
         new_state = hidden_states
 
-    active_weights = decode_weights if seq_len == 1 else weights
-    out = (
-        active_weights[0] * previous_2
-        + active_weights[1] * previous_1
-        + active_weights[2] * hidden_states
-    )
+    out = weights[0] * previous_2 + weights[1] * previous_1 + weights[2] * hidden_states
     if bias is not None:
         out = out + bias[None, :, None]
-    if seq_len < state_len and seq_len != 1:
-        out = out[..., -seq_len:]
+    if not decode and input_seq_len < state_len:
+        out = out[..., -input_seq_len:]
     return out.to(hidden_states.dtype), new_state
 
 
@@ -200,26 +197,26 @@ def _make_conv_block(layer):
         ]
     )
     identity = torch.eye(BLOCK_SIZE, dtype=conv.conv.weight.dtype)
-    conv._spyre_decode_weights = nn.ParameterList(
-        [
-            nn.Parameter(conv.conv.weight[:, 0, i][None, :, None], requires_grad=False)
-            for i in range(3)
-        ]
-    )
     conv._spyre_shift_matrices = nn.ParameterList(
         [
             nn.Parameter(torch.roll(identity, shift, dims=1), requires_grad=False)
             for shift in range(3)
         ]
     )
+    select_previous_2 = torch.zeros_like(identity)
+    select_previous_2[-2, 0] = 1
+    select_previous_1 = torch.zeros_like(identity)
+    select_previous_1[-1, 0] = 1
     shift_state = torch.roll(identity, -1, dims=1)
     shift_state[0, -1] = 0
+    append_token = torch.zeros_like(identity)
+    append_token[0, -1] = 1
     conv._spyre_decode_matrices = nn.ParameterList(
         [
-            nn.Parameter(identity[:, -2:-1], requires_grad=False),
-            nn.Parameter(identity[:, -1:], requires_grad=False),
+            nn.Parameter(select_previous_2, requires_grad=False),
+            nn.Parameter(select_previous_1, requires_grad=False),
             nn.Parameter(shift_state, requires_grad=False),
-            nn.Parameter(identity[-1:, :], requires_grad=False),
+            nn.Parameter(append_token, requires_grad=False),
         ]
     )
     ffn_norm = layer.ffn_norm
@@ -229,24 +226,19 @@ def _make_conv_block(layer):
         h = operator_norm(hidden_states)
         h = h * padding_mask[:, :, None]
         B, C, x = conv.in_proj(h).transpose(1, 2).chunk(3, dim=1)
-        conv_input = (B * x).contiguous()
-        if conv_input.shape[-1] == 1:
-            conv_input = conv_input[..., -1:]
-            C = C[..., -1:]
-        return conv_input, C.contiguous()
+        return (B * x).contiguous(), C.contiguous()
 
-    def conv_forward(conv_input, conv_state):
+    def conv_forward(conv_input, conv_state, decode):
         conv_out, new_state = _causal_depthwise_conv(
             conv_input,
             conv_state,
             conv._spyre_weights,
-            conv._spyre_decode_weights,
             conv._spyre_shift_matrices,
             conv._spyre_decode_matrices,
             conv.conv.bias,
+            decode,
         )
-        conv_state.copy_(new_state)
-        return conv_out, conv_state
+        return conv_out, new_state
 
     def post_conv_forward(hidden_states, c, conv_out):
         h = conv.out_proj((c * conv_out).transpose(1, 2).contiguous())
@@ -268,7 +260,10 @@ def _padding_mask(attn_mask, seq_len, cache_index):
     block_start = int(cache_index[0])
     rows = torch.arange(seq_len)
     diagonal = attn_mask.to("cpu")[:, 0, rows, block_start + rows]
-    return (diagonal == 0).to(dtype=attn_mask.dtype, device=DEVICE)
+    padding_mask = (diagonal == 0).to(dtype=attn_mask.dtype)
+    if seq_len == 1:
+        padding_mask = F.pad(padding_mask, (0, BLOCK_SIZE - 1))
+    return padding_mask.to(device=DEVICE)
 
 
 def _run_backbone_forward(
@@ -299,9 +294,18 @@ def _run_backbone_forward(
             )
         else:
             pre_conv, conv_forward, post_conv = compiled_block
-            conv_input, C = pre_conv(h, padding_mask)
-            conv_out, key_caches[i] = conv_forward(conv_input, key_caches[i])
-            h = post_conv(h, C, conv_out)
+            decode = h.shape[1] == 1
+            if decode:
+                h_for_conv = F.pad(h, (0, 0, 0, BLOCK_SIZE - 1))
+                padding_mask_for_conv = padding_mask
+            else:
+                h_for_conv = h
+                padding_mask_for_conv = padding_mask
+            conv_input, C = pre_conv(h_for_conv, padding_mask_for_conv)
+            conv_out, key_caches[i] = conv_forward(conv_input, key_caches[i], decode)
+            h = post_conv(h_for_conv, C, conv_out)
+            if decode:
+                h = h[:, :1]
 
     return backbone.embedding_norm(h)
 

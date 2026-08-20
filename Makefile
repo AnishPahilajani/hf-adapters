@@ -31,12 +31,14 @@ MODEL_KEY ?=
 # (see tests/conftest.py's pytest_generate_tests), which replaces the
 # registry-derived parametrization outright rather than filtering it -- so it
 # works for any model path, including ones that lost the smallest-per-adapter
-# CAUSAL_PATHS/EMBED_PATHS/VISION_PATHS representative slot. Matrix-style
-# per-model CI jobs pass this (see _test_matrix.yaml); empty = no override.
-MODEL_PATH ?= Qwen/Qwen3-0.6B \
-  mistralai/Ministral-3-8B-Instruct-2512 \
-  ibm-granite/granite-4.1-8b \
-  ibm-granite/granite-3.3-8b-instruct
+# CAUSAL_PATHS/EMBED_PATHS/VISION_PATHS representative slot. Space-separated for
+# multiple models in one invocation. Matrix-style per-model CI jobs pass a single
+# path (see _test_matrix.yaml); a fixed spot-check list (e.g. for a fast
+# TEST_TYPE=integration run) is the CALLER's to supply -- e.g.
+# integration-tests.yaml's own `models` input/default -- never hardcoded here,
+# so this Makefile stays agnostic of which models exist. Empty = no override
+# (run every model in the suite's registry-derived parametrization).
+MODEL_PATH ?=
 
 # Flags passed verbatim to pytest, mirroring _test_matrix.yaml's extra_test_flags.
 PYTEST_ARGS ?= -s -vvv

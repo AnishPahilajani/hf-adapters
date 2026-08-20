@@ -36,7 +36,7 @@ from tests.spyre.weekly_generation.failure_categories import (
     FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER,
     FAILURE_CATEGORY_QUANTIZED_MODEL,
     FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION,
-    FAILURE_CATEGORY_UNSUPPORTED_DIMENSIONS,
+    FAILURE_CATEGORY_UNSUPPORTED_CHECKPOINT,
     FAILURE_CATEGORY_VERIFICATION_FAILED,
 )
 from tests.spyre.weekly_generation.model_type import ModelType
@@ -124,7 +124,7 @@ def _process_batch(
                 from hf_adapters.hf_common import SpyreUnsupportedModelError
 
                 if isinstance(_adapter_exc, SpyreUnsupportedModelError):
-                    rec["failure_category"] = FAILURE_CATEGORY_UNSUPPORTED_DIMENSIONS
+                    rec["failure_category"] = FAILURE_CATEGORY_UNSUPPORTED_CHECKPOINT
                 else:
                     rec["failure_category"] = FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER
                 raise
@@ -148,7 +148,7 @@ def _process_batch(
             # failure_category itself is fully self-describing.
             if rec["failure_category"] not in (
                 FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER,
-                FAILURE_CATEGORY_UNSUPPORTED_DIMENSIONS,
+                FAILURE_CATEGORY_UNSUPPORTED_CHECKPOINT,
                 FAILURE_CATEGORY_MODEL_TOO_LARGE,
             ):
                 rec["error"] = (

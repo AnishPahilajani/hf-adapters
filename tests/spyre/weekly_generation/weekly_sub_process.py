@@ -139,7 +139,12 @@ def _process_batch(
                 _vprint(
                     f"{ts()}       child[{os.getpid()}] [{model_path}] step=resolve_adapter_module"
                 )
+                _resolve_start: float = _t.monotonic()
                 adapter_module = resolve_adapter_module_for_test(model_path)
+                _vprint(
+                    f"{ts()}       child[{os.getpid()}] [{model_path}] step=resolve_adapter_module done "
+                    f"({_t.monotonic() - _resolve_start:.1f}s)"
+                )
             except Exception as _adapter_exc:
                 from hf_adapters.hf_common import SpyreUnsupportedModelError
 

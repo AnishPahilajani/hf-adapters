@@ -518,25 +518,12 @@ jobs:
           path: junit-load-${{ matrix.model_key }}.xml
           retention-days: 14
 
-      # Records this leg as a uniquely-named artifact so collect-failed-suites can rebuild a retry matrix without relying on this job's own (continue-on-error-muddied) conclusion.
       - name: Save suite descriptor for pod-level retry
         if: failure()
-        shell: bash
-        run: |
-          mkdir -p "${RUNNER_TEMP}/failed_suite"
-          cat > "${RUNNER_TEMP}/failed_suite/suite.json" <<EOF
-          {"job_key": "load", "model_key": ${{ toJSON(matrix.model_key) }}}
-          EOF
-
-      # github.run_attempt in the name: the artifacts API is run-scoped not attempt-scoped, so without it a later attempt would retry a suite that already passed.
-      - name: Upload failed-suite descriptor
-        if: failure()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/save-failed-suite-descriptor
         with:
-          name: failed-suite-${{ github.run_attempt }}-load-${{ strategy.job-index }}
-          path: ${{ runner.temp }}/failed_suite/suite.json
-          if-no-files-found: error
-          retention-days: 1
+          job_key: load
+          payload: '{"model_key": ${{ toJSON(matrix.model_key) }}}'
 
   spyre-smoke-tests:
     name: Spyre smoke (${{ matrix.model_key }})
@@ -604,21 +591,10 @@ jobs:
 
       - name: Save suite descriptor for pod-level retry
         if: failure()
-        shell: bash
-        run: |
-          mkdir -p "${RUNNER_TEMP}/failed_suite"
-          cat > "${RUNNER_TEMP}/failed_suite/suite.json" <<EOF
-          {"job_key": "smoke", "model_key": ${{ toJSON(matrix.model_key) }}}
-          EOF
-
-      - name: Upload failed-suite descriptor
-        if: failure()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/save-failed-suite-descriptor
         with:
-          name: failed-suite-${{ github.run_attempt }}-smoke-${{ strategy.job-index }}
-          path: ${{ runner.temp }}/failed_suite/suite.json
-          if-no-files-found: error
-          retention-days: 1
+          job_key: smoke
+          payload: '{"model_key": ${{ toJSON(matrix.model_key) }}}'
 
   spyre-token-compare-tests:
     name: Spyre token compare (${{ matrix.model_key }})
@@ -682,21 +658,10 @@ jobs:
 
       - name: Save suite descriptor for pod-level retry
         if: failure()
-        shell: bash
-        run: |
-          mkdir -p "${RUNNER_TEMP}/failed_suite"
-          cat > "${RUNNER_TEMP}/failed_suite/suite.json" <<EOF
-          {"job_key": "token_compare", "model_key": ${{ toJSON(matrix.model_key) }}}
-          EOF
-
-      - name: Upload failed-suite descriptor
-        if: failure()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/save-failed-suite-descriptor
         with:
-          name: failed-suite-${{ github.run_attempt }}-token_compare-${{ strategy.job-index }}
-          path: ${{ runner.temp }}/failed_suite/suite.json
-          if-no-files-found: error
-          retention-days: 1
+          job_key: token_compare
+          payload: '{"model_key": ${{ toJSON(matrix.model_key) }}}'
 
   spyre-embed-compare-tests:
     name: Spyre embed compare (${{ matrix.model_key }})
@@ -760,21 +725,10 @@ jobs:
 
       - name: Save suite descriptor for pod-level retry
         if: failure()
-        shell: bash
-        run: |
-          mkdir -p "${RUNNER_TEMP}/failed_suite"
-          cat > "${RUNNER_TEMP}/failed_suite/suite.json" <<EOF
-          {"job_key": "embed_compare", "model_key": ${{ toJSON(matrix.model_key) }}}
-          EOF
-
-      - name: Upload failed-suite descriptor
-        if: failure()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/save-failed-suite-descriptor
         with:
-          name: failed-suite-${{ github.run_attempt }}-embed_compare-${{ strategy.job-index }}
-          path: ${{ runner.temp }}/failed_suite/suite.json
-          if-no-files-found: error
-          retention-days: 1
+          job_key: embed_compare
+          payload: '{"model_key": ${{ toJSON(matrix.model_key) }}}'
 
   spyre-vlm-e2e-tests:
     name: Spyre VLM e2e (${{ matrix.model_key }})
@@ -839,21 +793,10 @@ jobs:
 
       - name: Save suite descriptor for pod-level retry
         if: failure()
-        shell: bash
-        run: |
-          mkdir -p "${RUNNER_TEMP}/failed_suite"
-          cat > "${RUNNER_TEMP}/failed_suite/suite.json" <<EOF
-          {"job_key": "vlm", "model_key": ${{ toJSON(matrix.model_key) }}}
-          EOF
-
-      - name: Upload failed-suite descriptor
-        if: failure()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/save-failed-suite-descriptor
         with:
-          name: failed-suite-${{ github.run_attempt }}-vlm-${{ strategy.job-index }}
-          path: ${{ runner.temp }}/failed_suite/suite.json
-          if-no-files-found: error
-          retention-days: 1
+          job_key: vlm
+          payload: '{"model_key": ${{ toJSON(matrix.model_key) }}}'
 
   # ---------------------------------------------------------------------------
   # DISABLED (2026-07-17): Dedicated 2-card (x2) VLM job for google/gemma-4-12B-it.
@@ -972,21 +915,10 @@ jobs:
 
       - name: Save suite descriptor for pod-level retry
         if: failure()
-        shell: bash
-        run: |
-          mkdir -p "${RUNNER_TEMP}/failed_suite"
-          cat > "${RUNNER_TEMP}/failed_suite/suite.json" <<EOF
-          {"job_key": "reranker", "model_key": ${{ toJSON(matrix.model_key) }}}
-          EOF
-
-      - name: Upload failed-suite descriptor
-        if: failure()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/save-failed-suite-descriptor
         with:
-          name: failed-suite-${{ github.run_attempt }}-reranker-${{ strategy.job-index }}
-          path: ${{ runner.temp }}/failed_suite/suite.json
-          if-no-files-found: error
-          retention-days: 1
+          job_key: reranker
+          payload: '{"model_key": ${{ toJSON(matrix.model_key) }}}'
 
   spyre-masked-lm-compare-tests:
     name: Spyre masked-LM compare (${{ matrix.model_key }})
@@ -1047,21 +979,10 @@ jobs:
 
       - name: Save suite descriptor for pod-level retry
         if: failure()
-        shell: bash
-        run: |
-          mkdir -p "${RUNNER_TEMP}/failed_suite"
-          cat > "${RUNNER_TEMP}/failed_suite/suite.json" <<EOF
-          {"job_key": "masked_lm", "model_key": ${{ toJSON(matrix.model_key) }}}
-          EOF
-
-      - name: Upload failed-suite descriptor
-        if: failure()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/save-failed-suite-descriptor
         with:
-          name: failed-suite-${{ github.run_attempt }}-masked_lm-${{ strategy.job-index }}
-          path: ${{ runner.temp }}/failed_suite/suite.json
-          if-no-files-found: error
-          retention-days: 1
+          job_key: masked_lm
+          payload: '{"model_key": ${{ toJSON(matrix.model_key) }}}'
 
   spyre-question-answering-compare-tests:
     name: Spyre question-answering compare (${{ matrix.model_key }})
@@ -1122,21 +1043,10 @@ jobs:
 
       - name: Save suite descriptor for pod-level retry
         if: failure()
-        shell: bash
-        run: |
-          mkdir -p "${RUNNER_TEMP}/failed_suite"
-          cat > "${RUNNER_TEMP}/failed_suite/suite.json" <<EOF
-          {"job_key": "qa", "model_key": ${{ toJSON(matrix.model_key) }}}
-          EOF
-
-      - name: Upload failed-suite descriptor
-        if: failure()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/save-failed-suite-descriptor
         with:
-          name: failed-suite-${{ github.run_attempt }}-qa-${{ strategy.job-index }}
-          path: ${{ runner.temp }}/failed_suite/suite.json
-          if-no-files-found: error
-          retention-days: 1
+          job_key: qa
+          payload: '{"model_key": ${{ toJSON(matrix.model_key) }}}'
 
   # ---------------------------------------------------------------------------
   # Edge-case suite (daily-only).
@@ -1226,21 +1136,10 @@ jobs:
 
       - name: Save suite descriptor for pod-level retry
         if: failure()
-        shell: bash
-        run: |
-          mkdir -p "${RUNNER_TEMP}/failed_suite"
-          cat > "${RUNNER_TEMP}/failed_suite/suite.json" <<EOF
-          {"job_key": "edge_cases", "model_key": ${{ toJSON(matrix.model_key) }}, "test_file": ${{ toJSON(matrix.test_file) }}}
-          EOF
-
-      - name: Upload failed-suite descriptor
-        if: failure()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/save-failed-suite-descriptor
         with:
-          name: failed-suite-${{ github.run_attempt }}-edge_cases-${{ strategy.job-index }}
-          path: ${{ runner.temp }}/failed_suite/suite.json
-          if-no-files-found: error
-          retention-days: 1
+          job_key: edge_cases
+          payload: '{"model_key": ${{ toJSON(matrix.model_key) }}, "test_file": ${{ toJSON(matrix.test_file) }}}'
 
   spyre-model-module-tests:
     name: Spyre model-module tests (${{ matrix.config }})
@@ -1303,21 +1202,10 @@ jobs:
 
       - name: Save suite descriptor for pod-level retry
         if: failure()
-        shell: bash
-        run: |
-          mkdir -p "${RUNNER_TEMP}/failed_suite"
-          cat > "${RUNNER_TEMP}/failed_suite/suite.json" <<EOF
-          {"job_key": "model_module", "config": ${{ toJSON(matrix.config) }}}
-          EOF
-
-      - name: Upload failed-suite descriptor
-        if: failure()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/save-failed-suite-descriptor
         with:
-          name: failed-suite-${{ github.run_attempt }}-model_module-${{ strategy.job-index }}
-          path: ${{ runner.temp }}/failed_suite/suite.json
-          if-no-files-found: error
-          retention-days: 1
+          job_key: model_module
+          payload: '{"config": ${{ toJSON(matrix.config) }}}'
 
   # Pod-level retry (mirrors torch-spyre's _test_matrix.yaml): every spyre-*-tests job above is continue-on-error and uploads a "failed-suite-<key>-<attempt>-<idx>" descriptor artifact on a failed leg; this job downloads those descriptors and rebuilds one retry matrix per suite type for the *-retry jobs below to re-run on brand-new pods.
   collect-failed-suites:

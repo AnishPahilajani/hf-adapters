@@ -15,7 +15,11 @@ on:
     branches: [main]
     tags: ["*"]
   pull_request:
-    branches: [main]
+    # TEMPORARY: ci/path-sensitive-pr-tests added alongside main to let a
+    # stacked test PR (base=ci/path-sensitive-pr-tests) trigger this workflow
+    # for manual verification before #415 merges. Revert to just [main]
+    # before merging.
+    branches: [main, ci/path-sensitive-pr-tests]
     types: [opened, synchronize, reopened]
   merge_group:
     types: [checks_requested]

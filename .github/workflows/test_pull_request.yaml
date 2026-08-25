@@ -15,7 +15,14 @@ on:
     branches: [main]
     tags: ["*"]
   pull_request:
-    branches: [main]
+    # TEMPORARY: ci/path-sensitive-pr-tests added alongside main so this
+    # stacked test PR (base=ci/path-sensitive-pr-tests) triggers this
+    # workflow for manual verification before #415 merges. pull_request
+    # trigger-matching is evaluated against the workflow file on the HEAD
+    # (source) ref, not the base -- hence this lives here, not on
+    # ci/path-sensitive-pr-tests. This commit must not land on main; drop it
+    # when this test branch is done.
+    branches: [main, ci/path-sensitive-pr-tests]
     types: [opened, synchronize, reopened]
   merge_group:
     types: [checks_requested]

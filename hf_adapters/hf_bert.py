@@ -60,6 +60,7 @@ def _make_compiled_encoder_block(layer):
     ``attention.output`` (O + post-attn LN); the compiled body itself is
     shared with MPNet via ``make_encoder_block``.
     """
+    # BERT nests Q/K/V under attention.self, not top-level like decoder adapters.
     attn_self = layer.attention.self
     return make_encoder_block(
         attn_module=attn_self,

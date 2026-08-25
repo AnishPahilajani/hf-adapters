@@ -1691,8 +1691,8 @@ def write_module_config(
         -1
     ]  # e.g., "granite-3.3-8b-instruct" or "granite-3.0-2b-instruct"
 
-    # For the YAML content, use underscores for the model_name field
-    model_name_normalized = model_name.replace("-", "_").replace(".", "_")
+    # For the YAML content, no normalization
+    model_name_normalized = model_name
 
     # Generate unified YAML config (new format)
     unified_yaml_content = generate_unified_yaml_config(

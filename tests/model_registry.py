@@ -405,6 +405,16 @@ EMBEDDING_MODELS = {
 }
 
 
+TOKEN_CLASSIFICATION_MODELS = {
+    "bert_ner": {
+        "name": "BERT base NER",
+        "path": "dslim/bert-base-NER",
+        "adapter": "hf_bert.py",
+        "size": "0.1b",
+    },
+}
+
+
 QUESTION_ANSWERING_MODELS = {
     "bert_qa": {
         "name": "BERT base cased SQuAD 2",
@@ -630,6 +640,11 @@ QUESTION_ANSWERING_PATHS: list[str] = _exclude(
         QUESTION_ANSWERING_MODELS, include_gated=_include_gated_flag
     )
 )
+TOKEN_CLASSIFICATION_PATHS: list[str] = _exclude(
+    _select_representative_paths(
+        TOKEN_CLASSIFICATION_MODELS, include_gated=_include_gated_flag
+    )
+)
 VISION_PATHS: list[str] = _exclude(
     _select_representative_paths(
         VISION_MODELS,
@@ -679,6 +694,9 @@ ALL_MASKED_LM_PATHS: list[str] = _exclude(
 )
 ALL_QUESTION_ANSWERING_PATHS: list[str] = _exclude(
     _all_paths(QUESTION_ANSWERING_MODELS, include_gated=_include_gated_flag)
+)
+ALL_TOKEN_CLASSIFICATION_PATHS: list[str] = _exclude(
+    _all_paths(TOKEN_CLASSIFICATION_MODELS, include_gated=_include_gated_flag)
 )
 ALL_VISION_PATHS: list[str] = _exclude(
     _all_paths(

@@ -57,6 +57,10 @@ def generate_matrices(exclude_models=None, only_models=None):
             registry.ALL_QUESTION_ANSWERING_PATHS,
         ),
         "reranker": (registry.RERANKER_PATHS, registry.ALL_RERANKER_PATHS),
+        "token_classification": (
+            registry.TOKEN_CLASSIFICATION_PATHS,
+            registry.ALL_TOKEN_CLASSIFICATION_PATHS,
+        ),
     }
 
     paths = {}
@@ -67,12 +71,13 @@ def generate_matrices(exclude_models=None, only_models=None):
             selected = [p for p in selected if p in only_models]
         paths[name] = selected
 
-    # Feeds spyre-load-tests' matrix: test_load_spyre.py's four model_path suites.
+    # Feeds spyre-load-tests' matrix: test_load_spyre.py's five model_path suites.
     combined_paths = (
         paths["causal"]
         + paths["embed"]
         + paths["masked_lm"]
         + paths["question_answering"]
+        + paths["token_classification"]
     )
 
     return {
@@ -83,6 +88,7 @@ def generate_matrices(exclude_models=None, only_models=None):
         "question_answering": paths["question_answering"],
         "combined": combined_paths,
         "reranker": paths["reranker"],
+        "token_classification": paths["token_classification"],
     }
 
 
@@ -104,6 +110,7 @@ def format_for_github_actions(matrices):
         "question_answering_matrix": json.dumps(matrices["question_answering"]),
         "combined_matrix": json.dumps(matrices["combined"]),
         "reranker_matrix": json.dumps(matrices["reranker"]),
+        "token_classification_matrix": json.dumps(matrices["token_classification"]),
     }
 
 
@@ -176,6 +183,10 @@ def main():
     )
     print(
         f"  Reranker models ({len(matrices['reranker'])}): {', '.join(matrices['reranker'])}"
+    )
+    print(
+        f"  Token-classification models ({len(matrices['token_classification'])}): "
+        f"{', '.join(matrices['token_classification'])}"
     )
 
     if args.exclude:

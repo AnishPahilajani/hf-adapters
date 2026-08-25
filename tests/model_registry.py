@@ -240,11 +240,17 @@ CAUSAL_LM_MODELS = {
         "size": "1b",
     },
     # hf_gemma2.py
-    "gemma2_unsloth": {
+    "gemma2_2b_unsloth": {
         "name": "Gemma 2 2B",
         "path": "unsloth/gemma-2-2b-it",
         "adapter": "hf_gemma2.py",
         "size": "2b",
+    },
+    "gemma2_9b_unsloth": {
+        "name": "Gemma 2 9B",
+        "path": "unsloth/gemma-2-9b-it",
+        "adapter": "hf_gemma2.py",
+        "size": "9b",
     },
     # hf_gemma3.py
     "gemma3_unsloth": {
@@ -750,6 +756,7 @@ NON_BLOCKING_CAUSAL_MODELS: dict[str, str] = _non_blocking(
         "gemma4_google",  # gemma4 responds poorly to prompt without template
         "gemma4_base",
         "smollm3",
+        "gemma2_2b_unsloth",  # small gap that happens to flip token for test prompt
     ),
 )
 

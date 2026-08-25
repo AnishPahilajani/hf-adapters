@@ -87,6 +87,8 @@ permissions:
   contents: read
   checks: write
   pull-requests: read # so that gh pr view can fetch the changed-file list (select-changed-models)
+  # actions: read is required by _test_matrix.yaml's collect-failed-suites job to list/download failed-suite-* artifacts via the REST API; reusable workflows can only narrow the caller's permissions, so this must be granted here too.
+  actions: read
 
 jobs:
   # Resolves the `integration-test` label for BOTH pull_request and merge_group.

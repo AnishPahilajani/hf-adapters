@@ -31,7 +31,7 @@ pod and does not use `LLM()`.)
 ```bash
 python utils/module_discovery/auto_generate_module_config_vllm.py \
     --model ibm-granite/granite-3.3-8b-instruct \
-    --seq-len 128 \
+    --seq_len 128 \
     --dtype bfloat16
 ```
 
@@ -40,7 +40,7 @@ Arguments:
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--model` | *(required)* | HuggingFace model path/id |
-| `--seq-len` | `128` | Prefill sequence length |
+| `--seq_len` | `128` | Prefill sequence length |
 | `--dtype` | `bfloat16` | Model load dtype (`bfloat16` / `float16` / `float32`); also written to the YAML `supported_dtypes` |
 | `--model-impl` | `native` | vLLM backend (`native` / `transformers`) |
 | `--output` | `./tests/configs/module_tests/<model>_vllm_spyre.yaml` | Output YAML path |

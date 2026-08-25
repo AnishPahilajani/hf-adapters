@@ -118,13 +118,94 @@ def _resolve_attn_implementation(config: Any) -> str:
     return impl
 
 
-def _extract_config_kwargs(config: Any) -> Dict[str, Any]:
+def _layer_config(config: Any, layer_index: Optional[int]) -> Any:
+    """Return the config to read a layer's dimensions from.
+
+    A heterogeneous config (``per_layer_config``, e.g. a model whose layers differ
+    in ``num_key_value_heads``) refuses to serve per-layer attributes off the
+    global object: ``HeterogeneousConfigMixin.__getattribute__`` raises
+    ``AmbiguousGlobalPerLayerAttributeError`` and directs the caller to
+    ``config.per_layer_config[i].<attr>``. That exception is a ``RuntimeError``,
+    NOT an ``AttributeError``, so even ``hasattr(config, attr)`` propagates it --
+    a plain global read crashes rather than silently returning a wrong value.
+
+    Returns the per-layer config when this config is heterogeneous and the layer is
+    known, otherwise ``config`` unchanged. The per-layer entries are themselves
+    homogeneous instances of the same config class, so callers can read them
+    normally.
+    """
+    if layer_index is None:
+        return config
+    if not getattr(config, "is_heterogeneous", False):
+        return config
+    per_layer = getattr(config, "per_layer_config", None)
+    if not per_layer or layer_index >= len(per_layer):
+        logger.warning(
+            "Config is heterogeneous but has no per_layer_config entry for layer "
+            "%s; falling back to the global config, whose per-layer attributes may "
+            "raise or be wrong.",
+            layer_index,
+        )
+        return config
+    return per_layer[layer_index]
+
+
+# Sentinel distinguishing "attribute absent" from a legitimate ``None`` value.
+_CONFIG_ATTR_MISSING = object()
+
+
+def _read_config_attr(config: Any, attr: str) -> Any:
+    """Read one config attribute, tolerating heterogeneous per-layer attributes.
+
+    Returns :data:`_CONFIG_ATTR_MISSING` when the attribute cannot be read.
+
+    ``hasattr``/``getattr`` are not enough on a heterogeneous config. Reading a
+    per-layer attribute (e.g. ``num_key_value_heads`` on Gemma 4, whose layers mix
+    full and sliding attention) raises ``AmbiguousGlobalPerLayerAttributeError``,
+    and because that is a ``RuntimeError`` rather than an ``AttributeError`` even
+    ``hasattr`` propagates it.
+
+    :func:`_layer_config` handles the case where the layer is known. It cannot help
+    here: a module may legitimately own the heterogeneous config without belonging
+    to one layer -- Gemma 4's ``language_model`` is the whole decoder stack, so it
+    has no layer index, yet its config carries the per-layer attributes. For those,
+    the only correct answer is "there is no single value", so the attribute is
+    dropped and the framework falls back to the config's own default when
+    rebuilding. Dropping is safer than recording one layer's value as if it were
+    global.
+    """
+    try:
+        return getattr(config, attr)
+    except AttributeError:
+        return _CONFIG_ATTR_MISSING
+    except RuntimeError as exc:
+        # AmbiguousGlobalPerLayerAttributeError and anything else the config raises
+        # to say "this value is not well defined globally".
+        logger.debug(
+            "Skipping config attribute %r: not readable off this config (%s)",
+            attr,
+            type(exc).__name__,
+        )
+        return _CONFIG_ATTR_MISSING
+
+
+def _extract_config_kwargs(
+    config: Any, layer_index: Optional[int] = None
+) -> Dict[str, Any]:
     """Extract the config parameters the framework needs to rebuild a module.
 
     ``_attn_implementation`` is resolved to a concrete implementation (never
     ``None``) so a module reconstructed from the YAML dispatches attention the
     same way it did during capture.
+
+    ``layer_index`` selects which layer's values to read on a heterogeneous config
+    (see :func:`_layer_config`). Without it, reading a per-layer attribute such as
+    ``num_key_value_heads`` off the global config raises
+    ``AmbiguousGlobalPerLayerAttributeError``. It is optional so the out-of-layer
+    callers (and homogeneous models, i.e. every model today) are unaffected.
     """
+    config = _layer_config(config, layer_index)
+
     config_kwargs: Dict[str, Any] = {}
     for attr in [
         "hidden_size",
@@ -133,10 +214,11 @@ def _extract_config_kwargs(config: Any) -> Dict[str, Any]:
         "intermediate_size",
         "max_position_embeddings",
     ]:
-        if hasattr(config, attr):
-            config_kwargs[attr] = getattr(config, attr)
+        value = _read_config_attr(config, attr)
+        if value is not _CONFIG_ATTR_MISSING:
+            config_kwargs[attr] = value
 
-    if hasattr(config, "_attn_implementation"):
+    if _read_config_attr(config, "_attn_implementation") is not _CONFIG_ATTR_MISSING:
         config_kwargs["_attn_implementation"] = _resolve_attn_implementation(config)
 
     return config_kwargs
@@ -447,6 +529,11 @@ def _extract_cache_info(
         config = getattr(past_key_values, "config", None)
     if config is not None:
         config_cls = type(config)
+        # Read the dimensions off this layer's config: a heterogeneous config
+        # raises AmbiguousGlobalPerLayerAttributeError for per-layer attributes
+        # such as num_key_value_heads, and that exception is a RuntimeError, so
+        # even hasattr() below would propagate it (see _layer_config).
+        dim_config = _layer_config(config, layer_idx)
         config_kwargs = {}
         for attr in [
             "hidden_size",
@@ -456,8 +543,9 @@ def _extract_cache_info(
             "num_hidden_layers",
             "max_position_embeddings",
         ]:
-            if hasattr(config, attr):
-                config_kwargs[attr] = getattr(config, attr)
+            value = _read_config_attr(dim_config, attr)
+            if value is not _CONFIG_ATTR_MISSING:
+                config_kwargs[attr] = value
         # num_hidden_layers must cover layer_idx: the framework primes the cache
         # with cache.update(key, value, layer_idx), so a cache sized to 1 layer
         # raises IndexError for any layer_idx > 0 (e.g. --capture_layers 0,5).
@@ -495,10 +583,18 @@ class ModuleInfoCapture:
         )
 
     def capture_constructor_info(
-        self, module, module_name: str, module_type: str
+        self,
+        module,
+        module_name: str,
+        module_type: str,
+        layer_index: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Capture constructor information from an instantiated module.
+
+        ``layer_index`` selects which layer's dimensions to read on a heterogeneous
+        config (see :func:`_layer_config`); it is optional so out-of-layer modules
+        and homogeneous models behave exactly as before.
 
         This inspects the module to infer what constructor args were used.
         For Transformers modules, we look for config objects and layer_idx.
@@ -523,7 +619,7 @@ class ModuleInfoCapture:
                 config_module = type(config).__module__
 
                 # Extract key config parameters
-                config_kwargs = _extract_config_kwargs(config)
+                config_kwargs = _extract_config_kwargs(config, layer_index)
 
                 constructor_args.append(
                     {
@@ -559,7 +655,7 @@ class ModuleInfoCapture:
             config_module = type(config).__module__
 
             # Extract key config parameters
-            config_kwargs = _extract_config_kwargs(config)
+            config_kwargs = _extract_config_kwargs(config, layer_index)
 
             constructor_args.append(
                 {
@@ -659,7 +755,7 @@ class ModuleInfoCapture:
 
             # Capture constructor information to create unique config identifier
             constructor_info = self.capture_constructor_info(
-                module, module_name, module_type
+                module, module_name, module_type, layer_index
             )
 
             # Create a unique identifier based on module type + constructor args
@@ -1608,7 +1704,7 @@ def write_module_config(
         output_path = output
     else:
         # Use tests/configs directory for unified format
-        output_path = f"./tests/configs/module_tests/{model_name_normalized}_spyre.yaml"
+        output_path = f"./tests/configs/module_tests/{model_name_normalized}.yaml"
 
     # Write unified YAML file
     output_file = Path(output_path)
@@ -1648,7 +1744,7 @@ def parse_args():
         "--output",
         type=str,
         default=None,
-        help="Output YAML file path (default: ./tests/configs/<model>_spyre.yaml)",
+        help="Output YAML file path (default: ./tests/configs/<model>.yaml)",
     )
     parser.add_argument(
         "--no_static_cache",

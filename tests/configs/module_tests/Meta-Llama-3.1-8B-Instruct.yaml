@@ -16,9 +16,38 @@ test_suite_config:
           edits:
             modules:
               include: &id001
+                - name: Embedding_4c1a0852
+                  module_path: torch.nn.modules.sparse.Embedding
+                  description: 'Module: torch.nn.modules.sparse.Embedding (defined at torch/nn/modules/sparse.py:14)'
+                  constructor_inputs:
+                    args: []
+                    kwargs: {}
+                  forward_inputs:
+                    - args:
+                        - tensor:
+                            shape: [1, 128]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.int64
+                            device: spyre
+                            init: randint
+                            init_args:
+                              high: 1
+                      kwargs: {}
+                    - args:
+                        - tensor:
+                            shape: [1, 1]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.int64
+                            device: spyre
+                            init: randint
+                            init_args:
+                              high: 1
+                      kwargs: {}
                 - name: LlamaRotaryEmbedding_b501b76c
                   module_path: transformers.models.llama.modeling_llama.LlamaRotaryEmbedding
-                  description: 'Module: transformers.models.llama.modeling_llama.LlamaRotaryEmbedding (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/llama/modeling_llama.py#L73)'
+                  description: 'Module: transformers.models.llama.modeling_llama.LlamaRotaryEmbedding (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/llama/modeling_llama.py#L73)'
                   constructor_inputs:
                     args:
                       - config_path: transformers.models.llama.configuration_llama.LlamaConfig
@@ -71,7 +100,7 @@ test_suite_config:
                               high: 1
                 - name: LlamaDecoderLayer_layer0
                   module_path: transformers.models.llama.modeling_llama.LlamaDecoderLayer
-                  description: 'Module: transformers.models.llama.modeling_llama.LlamaDecoderLayer (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/llama/modeling_llama.py#L292)'
+                  description: 'Module: transformers.models.llama.modeling_llama.LlamaDecoderLayer (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/llama/modeling_llama.py#L284)'
                   constructor_inputs:
                     args:
                       - config_path: transformers.models.llama.configuration_llama.LlamaConfig
@@ -132,7 +161,7 @@ test_suite_config:
                             shape: [1, 1, 1, 2048]
                             stride: null
                             storage_offset: 0
-                            dtype: torch.bool
+                            dtype: torch.int64
                             device: spyre
                             init: randint
                             init_args:
@@ -188,9 +217,9 @@ test_suite_config:
                               head_dim: 128
                               num_hidden_layers: 1
                               max_position_embeddings: 131072
-                - name: LlamaRMSNorm_4096
+                - name: LlamaRMSNorm_4096_layer0
                   module_path: transformers.models.llama.modeling_llama.LlamaRMSNorm
-                  description: 'Module: transformers.models.llama.modeling_llama.LlamaRMSNorm (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/llama/modeling_llama.py#L52)'
+                  description: 'Module: transformers.models.llama.modeling_llama.LlamaRMSNorm (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/llama/modeling_llama.py#L52)'
                   constructor_inputs:
                     args:
                       - value: 4096
@@ -216,7 +245,7 @@ test_suite_config:
                       kwargs: {}
                 - name: LlamaAttention_layer0
                   module_path: transformers.models.llama.modeling_llama.LlamaAttention
-                  description: 'Module: transformers.models.llama.modeling_llama.LlamaAttention (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/llama/modeling_llama.py#L224)'
+                  description: 'Module: transformers.models.llama.modeling_llama.LlamaAttention (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/llama/modeling_llama.py#L216)'
                   constructor_inputs:
                     args:
                       - config_path: transformers.models.llama.configuration_llama.LlamaConfig
@@ -279,7 +308,7 @@ test_suite_config:
                             shape: [1, 1, 1, 2048]
                             stride: null
                             storage_offset: 0
-                            dtype: torch.bool
+                            dtype: torch.int64
                             device: spyre
                             init: randint
                             init_args:
@@ -335,9 +364,52 @@ test_suite_config:
                               dtype: torch.bfloat16
                               device: spyre
                               init: xavier
-                - name: LlamaMLP_231f37b9
+                - name: Linear_layer0
+                  module_path: torch.nn.modules.linear.Linear
+                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
+                  constructor_inputs:
+                    args: []
+                    kwargs: {}
+                  forward_inputs:
+                    - args:
+                        - tensor:
+                            shape: [1, 128, 4096]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.bfloat16
+                            device: spyre
+                            init: xavier
+                      kwargs: {}
+                    - args:
+                        - tensor:
+                            shape: [1, 128, 14336]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.bfloat16
+                            device: spyre
+                            init: xavier
+                      kwargs: {}
+                    - args:
+                        - tensor:
+                            shape: [1, 1, 4096]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.bfloat16
+                            device: spyre
+                            init: xavier
+                      kwargs: {}
+                    - args:
+                        - tensor:
+                            shape: [1, 1, 14336]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.bfloat16
+                            device: spyre
+                            init: xavier
+                      kwargs: {}
+                - name: LlamaMLP_layer0
                   module_path: transformers.models.llama.modeling_llama.LlamaMLP
-                  description: 'Module: transformers.models.llama.modeling_llama.LlamaMLP (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/llama/modeling_llama.py#L171)'
+                  description: 'Module: transformers.models.llama.modeling_llama.LlamaMLP (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/llama/modeling_llama.py#L163)'
                   constructor_inputs:
                     args:
                       - config_path: transformers.models.llama.configuration_llama.LlamaConfig
@@ -368,9 +440,9 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: SiLUActivation_d2f532e9
+                - name: SiLUActivation_layer0
                   module_path: transformers.activations.SiLUActivation
-                  description: 'Module: transformers.activations.SiLUActivation (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/activations.py#L92)'
+                  description: 'Module: transformers.activations.SiLUActivation (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/activations.py#L92)'
                   constructor_inputs:
                     args: []
                     kwargs: {}
@@ -387,6 +459,32 @@ test_suite_config:
                     - args:
                         - tensor:
                             shape: [1, 1, 14336]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.bfloat16
+                            device: spyre
+                            init: xavier
+                      kwargs: {}
+                - name: LlamaRMSNorm_4096
+                  module_path: transformers.models.llama.modeling_llama.LlamaRMSNorm
+                  description: 'Module: transformers.models.llama.modeling_llama.LlamaRMSNorm (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/llama/modeling_llama.py#L52)'
+                  constructor_inputs:
+                    args:
+                      - value: 4096
+                    kwargs: {}
+                  forward_inputs:
+                    - args:
+                        - tensor:
+                            shape: [1, 128, 4096]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.bfloat16
+                            device: spyre
+                            init: xavier
+                      kwargs: {}
+                    - args:
+                        - tensor:
+                            shape: [1, 1, 4096]
                             stride: null
                             storage_offset: 0
                             dtype: torch.bfloat16

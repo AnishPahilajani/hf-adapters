@@ -86,7 +86,7 @@ def _move_inputs(module_input, *, dtype=None, device=None):
         if not isinstance(x, torch.Tensor):
             return x
         if device is not None and is_interesting_dtype(x.dtype):
-            return x.to(device, dtype)
+            return x.to(dtype).to(device)
         if device is not None:
             return x.to(device)
         if is_interesting_dtype(x.dtype):

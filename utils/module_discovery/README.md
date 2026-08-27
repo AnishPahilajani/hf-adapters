@@ -58,7 +58,7 @@ Arguments:
 | `--loader` | `hf` | Capture path (see the table above) |
 | `--dtype` | `bfloat16` (hf) / `float16` (spyre) | Load dtype. The spyre default matches `AutoSpyreModelForCausalLM`; `auto` consults the adapter registry's per-model dtype |
 | `--device` | `spyre` | **`--loader spyre` only.** Patches `hf_common.DEVICE`. Pass `cpu` for an off-pod dry run (no `torch_spyre` needed) |
-| `--max_new_tokens` | `3` | **`--loader spyre` only.** Decode steps to run — see "Why 3" below |
+| `--max_new_tokens` | `3` | **`--loader spyre` only.** Decode steps to run; `>= 2` reaches both forward shapes — see below |
 | `--no_static_cache` | off | **`--loader hf` only.** Use the model's default dynamic KV cache instead of a `StaticCache` |
 | `--max_cache_len` | `2048` | **`--loader hf` only.** `StaticCache` capacity |
 
@@ -89,6 +89,57 @@ The generated YAML:
   it with the captured dimensions,
 - stores each module's captured forward-input shapes/dtypes in `forward_inputs`, one
   entry per distinct invocation pattern.
+
+### One entry per execution phase
+
+A module is called with different shapes in different phases of generation, and each
+phase becomes **its own YAML entry**, with the phase in the name:
+
+```
+GraniteMLP_77d2613c_prefill
+GraniteMLP_77d2613c_decode
+Linear_e6950b45_prefill_h4096     # width suffix, see below
+Linear_e6950b45_prefill_h12800
+```
+
+This exists because upstream builds the test name from the module class, not from the
+YAML `name`. Several invocations inside one entry therefore become several
+`ModuleInput`s under a **single** test id — so a failure cannot be attributed to a
+phase, and a failing early invocation stops the later ones from running at all.
+One entry per phase gives each its own test id, which also makes `-k prefill` /
+`-k decode` work.
+
+Labels, in order of specificity:
+
+| Label | Meaning |
+|-------|---------|
+| `prefill` | the prompt pass — the longest sequence the module sees |
+| `decode` | the per-token pass |
+
+Both loaders produce exactly these two shapes, and the labels are shared on purpose so
+one `-k decode` selects the same phase either way, even though `hf` shapes it as
+`seq_len=1` and the Spyre adapter block-pads the prompt.
+
+There is deliberately no third label. The Spyre path used to walk a 64-slot block (an
+`expansion` forward claiming a block, then `is_filling=True` writes into it), but
+hf-adapters#330 replaced that with an indirect scatter and one token per step — so
+`is_filling` is gone and those phases no longer exist.
+
+The prefill test is *relative* — the longest sequence a module saw — never a fixed
+length, because the two loaders run different shapes (`hf` sees 128/1; the Spyre
+adapter block-pads the prompt).
+
+The sequence length is dim 1 of the invocation's first 3-D tensor, or of a 2-D one
+when there is no 3-D tensor (token ids arrive as `[batch, seq_len]`). A module where
+neither rank is present is left as a single unsplit entry and logged, rather than
+risking a wrong label.
+
+**Width suffix.** One class can be used at more than one width under the same config —
+`nn.Linear` serves both the `4096→12800` and `12800→4096` halves of a gated MLP, and
+both are captured under one config signature. Where that leaves two invocations sharing
+a phase, the feature width is appended (`Linear_..._decode_h4096`) so each still gets
+its own entry and test id. Modules without such a collision keep the short
+`<name>_<phase>` form.
 
 ### `--loader spyre` specifics
 
@@ -129,21 +180,15 @@ decoder layer plus an `is_res_mul` flag, and it owns submodules (`mlp`, both nor
 `tests/spyre/test_e2e_*`. `PrecomputedRotaryEmbedding` / `InvFreqShim` are skipped for
 the same reason — the HF rotary module they wrap is captured instead.
 
-**Why `--max_new_tokens 3`.** `generate()` produces three distinct forward shapes, and
-3 is the minimum that reaches all of them:
+**`--max_new_tokens` only needs to reach the second shape.** The generate loop produces
+two forward shapes — the padded prompt pass (`i=0`) and the per-token pass (`i>=1`) —
+so anything `>= 2` reaches both, and the default leaves one step of margin.
 
-| step | `is_filling` | `token_index` | `cache_position` | |
-|------|--------------|---------------|------------------|--|
-| `i=0` | `False` | `0` | `0` | PREFILL — the whole prompt |
-| `i=1` | `False` | `0` | `BLOCK_SIZE` | EXPANSION — claim the next 64-token block |
-| `i=2` | **`True`** | `1` | | FILL — write one token into that block |
-
-FILL matters disproportionately: `is_filling` selects a different branch of
-`kv_cache_update` (write one token at `token_index` vs. write the whole block), and
-`torch.compile` specializes on it, so FILL is a separately compiled binary — and it is
-the shape nearly every generated token uses. Raising the value further only adds more
-FILL invocations at successive `token_index` values, each another compiled binary in
-the module test.
+Extra steps add no new shape. Since hf-adapters#330 the KV cache is written by an
+indirect scatter whose index is a *tensor*, so one compiled binary serves every write
+position and every decode step looks identical to the capture. (Before that change the
+loop walked a 64-slot block and each write position specialized into its own binary,
+which is why an earlier version of this generator needed three steps.)
 
 ---
 

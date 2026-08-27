@@ -218,6 +218,179 @@ def _ensure_hf_adapters_importable() -> None:
         sys.path.insert(0, repo_root)
 
 
+# ---------------------------------------------------------------------------
+# Execution-phase split (both loaders)
+# ---------------------------------------------------------------------------
+#
+# Upstream builds the generated test name from ``module_info.formatted_name``
+# (common_modules.py), so a YAML entry carrying several invocations becomes several
+# ModuleInputs under ONE test id: a failure cannot be attributed to a phase, and a
+# failing early invocation stops the later ones from running at all. Emitting one
+# entry per phase -- with the phase in the name -- gives each its own test id.
+#
+# The OOT framework already makes the YAML ``name`` authoritative
+# (_make_named_module_info_cls), so this needs no framework change.
+
+# Both loaders produce exactly two forward shapes: the prompt pass and the
+# per-token pass. The same two labels are used for both, so one ``-k prefill`` /
+# ``-k decode`` selects the same phase either way, even though the shapes differ
+# (hf sees 128/1; the Spyre adapter sees a block-padded prompt then 1).
+#
+# There is deliberately no third label. The Spyre path used to walk a 64-slot block
+# -- an ``expansion`` forward claiming a block, then ``is_filling=True`` writes into
+# it -- but hf-adapters#330 replaced that with an indirect scatter and one token per
+# step, so ``is_filling`` no longer exists and those two phases are gone with it.
+PHASE_PREFILL = "prefill"
+PHASE_DECODE = "decode"
+
+
+def _invocation_seq_len(invocation_inputs: List[Dict[str, Any]]) -> Optional[int]:
+    """Sequence length of an invocation: dim 1 of its first 3-D or 2-D tensor.
+
+    Activations reach a decoder submodule as ``[batch, seq_len, hidden]`` and token
+    ids as ``[batch, seq_len]``, so dim 1 is the sequence length in both cases. 3-D
+    is preferred over 2-D: where both are present the 3-D one is the activation,
+    while a 2-D tensor could be an unrelated 2-D argument.
+
+    Returns ``None`` when neither rank is present (e.g. a 4-D-only module), leaving
+    that module unsplit rather than risking a wrong label.
+    """
+
+    def _dim1(rank: int) -> Optional[int]:
+        for inp in invocation_inputs:
+            shape = inp.get("shape")
+            if isinstance(shape, list) and len(shape) == rank:
+                return shape[1]
+            for item in inp.get("items", []) or []:
+                shape = item.get("shape")
+                if isinstance(shape, list) and len(shape) == rank:
+                    return shape[1]
+        return None
+
+    return _dim1(3) if _dim1(3) is not None else _dim1(2)
+
+
+def _invocation_feature_width(
+    invocation_inputs: List[Dict[str, Any]],
+) -> Optional[int]:
+    """Trailing (feature) dimension of an invocation's first 3-D tensor.
+
+    Used only to disambiguate two invocations that share a phase label, where the
+    sequence length is by definition equal and the feature width is what differs --
+    e.g. a gated MLP's ``nn.Linear`` called at both 4096 and 12800.
+
+    Returns ``None`` when no 3-D tensor is present, in which case the caller leaves
+    the collision in place rather than inventing a suffix.
+    """
+    for inp in invocation_inputs:
+        shape = inp.get("shape")
+        if isinstance(shape, list) and len(shape) == 3:
+            return shape[-1]
+        for item in inp.get("items", []) or []:
+            shape = item.get("shape")
+            if isinstance(shape, list) and len(shape) == 3:
+                return shape[-1]
+    return None
+
+
+def _phase_label(
+    invocation_inputs: List[Dict[str, Any]],
+    prompt_seq_len: Optional[int],
+) -> Optional[str]:
+    """Label one invocation ``prefill`` or ``decode`` by its sequence length.
+
+    Both loaders produce exactly two forward shapes -- the prompt pass and the
+    per-token pass -- so the same two labels cover both, and one ``-k decode``
+    selects the same phase either way.
+
+    The prefill test is relative (``seq_len == prompt_seq_len``), never a fixed
+    length: the two loaders run different shapes (hf sees 128/1; the Spyre adapter
+    block-pads the prompt), so any hardcoded value would mislabel one of them.
+
+    Returns ``None`` when no sequence length can be read, leaving the entry unsplit.
+    """
+    if prompt_seq_len is None:
+        return None
+    seq_len = _invocation_seq_len(invocation_inputs)
+    if seq_len is None:
+        return None
+    return PHASE_PREFILL if seq_len == prompt_seq_len else PHASE_DECODE
+
+
+def split_module_data_by_phase(capture: "ModuleInfoCapture") -> None:
+    """Rewrite ``capture.module_data`` so each entry holds exactly one invocation.
+
+    Runs after capture rather than inside the hooks because the prefill label is
+    defined relative to the longest sequence a module saw, which is only known once
+    every invocation has been observed.
+
+    Each phase becomes its own entry named ``<original name>_<phase>``, keeping the
+    original identifier (a dim, a layer index, a config hash) so modules that differ
+    by config stay distinguishable. A module whose invocations cannot be labelled
+    (no sequence length readable from any argument) is left exactly as it was -- an
+    unsplit entry is better than a mislabelled one.
+
+    A phase can still hold several invocations when one class is used at more than
+    one width under the same config -- ``nn.Linear`` serves both the 4096->12800 and
+    12800->4096 halves of a gated MLP, and both are captured under one config
+    signature. Those get the feature width appended (``..._decode_h4096``) so each
+    still lands in its own entry with its own test id.
+    """
+    split: Dict[str, Dict[str, Any]] = {}
+
+    for name, data in capture.module_data.items():
+        invocations = data.get("invocations", [])
+
+        # The prompt pass is the longest sequence this module saw.
+        seq_lens = [_invocation_seq_len(inv) for inv in invocations]
+        known = [s for s in seq_lens if s is not None]
+        prompt_seq_len = max(known) if known else None
+
+        labels = [_phase_label(inv, prompt_seq_len) for inv in invocations]
+        if len(invocations) < 2 or any(lbl is None for lbl in labels):
+            if len(invocations) > 1:
+                logger.info(
+                    "%s: keeping %d invocations in one entry (no phase label "
+                    "available for every invocation).",
+                    name,
+                    len(invocations),
+                )
+            split[name] = data
+            continue
+
+        # Disambiguate only where a label is genuinely reused, so the common case
+        # keeps the short ``<name>_<phase>`` form.
+        duplicated = {lbl for lbl in labels if labels.count(lbl) > 1}
+
+        for label, inv in zip(labels, invocations):
+            phase_name = f"{name}_{label}"
+            if label in duplicated:
+                width = _invocation_feature_width(inv)
+                if width is not None:
+                    phase_name = f"{phase_name}_h{width}"
+            if phase_name in split:
+                # Still colliding: two invocations share a label AND a width. Keep
+                # both rather than dropping one, and say so -- the test id cannot
+                # then tell them apart.
+                logger.warning(
+                    "%s: more than one invocation labelled %r with the same width; "
+                    "leaving them in one entry, so a failing test id will not say "
+                    "which one broke.",
+                    phase_name,
+                    label,
+                )
+                split[phase_name]["invocations"].append(inv)
+                continue
+            entry = data.copy()
+            entry["name"] = phase_name
+            entry["invocations"] = [inv]
+            entry.pop("invocation_signatures", None)
+            entry["phase"] = label
+            split[phase_name] = entry
+
+    capture.module_data = split
+
+
 def _snapshot_hf_attention_classes(model) -> Dict[str, Tuple[str, Any, int]]:
     """Record each decoder layer's HF attention class BEFORE prepare_for_spyre().
 
@@ -277,9 +450,10 @@ def _extract_tensor_info(tensor: torch.Tensor, name: str) -> Dict[str, Any]:
     }
 
 
-# Scalar types recorded verbatim as a forward arg. A module's forward may take
-# plain Python scalars alongside tensors -- e.g. the Spyre attention block's
-# ``is_filling`` (bool) / ``token_index`` (int) / ``cache_position`` (int).
+# Scalar types recorded verbatim as a forward arg. A module's forward may take plain
+# Python scalars alongside tensors (a flag, an index, a length). Recording them is
+# not optional for POSITIONAL args: dropping one shifts every later arg a slot left,
+# so the replayed forward is called with the wrong arity.
 # ``bool`` precedes ``int`` only for clarity; ``isinstance`` covers both since
 # bool subclasses int.
 _SCALAR_ARG_TYPES = (bool, int, float, str)
@@ -983,11 +1157,10 @@ class ModuleInfoCapture:
             - Single tensor: {"name": "arg_0", "shape": [...], "dtype": ..., ...}
             - Container: {"name": "arg_0", "type": "list/tuple/dict/pytree", "items": [...]}
             """
-            # A scalar: include the VALUE, not just the type. Prefill and decode
-            # can differ only in these flags (is_filling / token_index /
-            # cache_position on the Spyre attention path, where the tensor shapes
-            # are otherwise identical), so ignoring the value would collapse the
-            # two invocations into one and lose the decode pattern entirely.
+            # A scalar: include the VALUE, not just the type. Two invocations can
+            # differ only in a scalar while their tensor shapes are identical, so
+            # ignoring the value would collapse them into one and silently drop a
+            # pattern the module is really called with.
             if input_info.get("type") == "value":
                 return {"type": "value", "value": input_info.get("value")}
             # A KV cache: distinct pattern so prefill (no cache) and decode
@@ -1354,6 +1527,17 @@ def _build_module_entry_dict(module_info: Dict[str, Any]) -> Dict[str, Any]:
                 "args": forward_args if forward_args else [],
                 "kwargs": forward_kwargs if forward_kwargs else {},
             }
+        )
+
+    # One invocation per entry is the point of the phase split: it is what makes a
+    # test id identify exactly one phase. Warn rather than fail so an unexpected
+    # shape is visible in the generated YAML instead of aborting the capture.
+    if module_info.get("phase") and len(forward_inputs_list) > 1:
+        logger.warning(
+            "%s: %d invocations in a phase-split entry (expected 1), so a failing "
+            "test id will not say which phase broke.",
+            module_info.get("name", "<unknown>"),
+            len(forward_inputs_list),
         )
 
     forward_inputs = forward_inputs_list
@@ -1763,29 +1947,17 @@ def run_spyre_capture_forward(
 ):
     """Drive the Spyre execution path so the capture hooks see every forward shape.
 
-    Delegates to ``hf_common.generate`` rather than re-implementing the padded
-    64-block loop: generate() already builds the block-padded input_ids, the KV
-    cache list, the position_ids and the prefill/decode masks exactly as
-    production does, so the captured shapes are the real ones.
+    Delegates to the adapter's own generate loop rather than re-implementing it: that
+    loop already builds the block-padded input_ids, the KV caches, the position_ids
+    and the prefill/decode masks exactly as production does, so the captured shapes
+    are the real ones.
 
-    ``max_new_tokens=3`` is the minimum that reaches all THREE forward shapes
-    generate() produces. ``tokens_in_block`` starts at ``BLOCK_SIZE - 1`` and
-    advances ``(x + 1) % BLOCK_SIZE`` per token, so the loop runs::
-
-        i=0  PREFILL    is_filling=False token_index=0  cache_position=0
-        i=1  EXPANSION  is_filling=False token_index=0  cache_position=BLOCK_SIZE
-        i=2  FILL       is_filling=True  token_index=1
-
-    FILL matters disproportionately: ``is_filling`` selects a different branch in
-    ``kv_cache_update`` (write one token at ``token_index`` vs. write the whole
-    block), and torch.compile specializes on it, so FILL is a separately compiled
-    binary -- and it is the shape almost every generated token actually uses.
-    Stopping at 2 would leave that path untested.
-
-    Going beyond 3 adds only more FILL invocations at higher ``token_index``
-    values. Each is a distinct invocation signature (values, not just types, are
-    compared) and therefore another compiled binary in the module test, so the
-    default stops at the first one.
+    ``max_new_tokens`` only has to reach the second of the two forward shapes the
+    loop produces -- the padded prompt pass, then the per-token pass -- so anything
+    >= 2 suffices and the default leaves one step of margin. Extra steps add no new
+    shape: since hf-adapters#330 the cache is written by an indirect scatter with a
+    *tensor* index, so one compiled binary serves every write position and every
+    decode step looks identical to the capture.
 
     ``seq_len`` is only a target: generate() block-pads the prompt to a multiple of
     BLOCK_SIZE, so the captured sequence length is the padded one. That is the
@@ -1877,15 +2049,22 @@ def write_module_config(
     output: str = None,
     filename_suffix: str = "",
 ):
-    """Generate the unified YAML config from captured modules and write it out."""
+    """Generate the unified YAML config from captured modules and write it out.
+
+    Splits every captured module into one entry per execution phase first (see
+    :func:`split_module_data_by_phase`), so each phase gets its own test id. Done
+    here rather than in each capture driver so both loaders get it from one place.
+    """
+    split_module_data_by_phase(capture)
+
     # Extract model name from path (handle both local paths and HuggingFace paths)
     model_path_parts = model_path.rstrip("/").split("/")
     model_name = model_path_parts[
         -1
     ]  # e.g., "granite-3.3-8b-instruct" or "granite-3.0-2b-instruct"
 
-    # For the YAML content, use underscores for the model_name field
-    model_name_normalized = model_name.replace("-", "_").replace(".", "_")
+    # For the YAML content, no normalization
+    model_name_normalized = model_name
 
     # Generate unified YAML config (new format)
     unified_yaml_content = generate_unified_yaml_config(
@@ -1972,11 +2151,11 @@ def parse_args():
         "--max_new_tokens",
         type=int,
         default=3,
-        help="--loader spyre only: decode steps to run (default 3 = PREFILL + "
-        "EXPANSION + FILL, the minimum that exercises all three forward shapes; "
-        "FILL is the is_filling=True path that nearly every generated token uses). "
-        "Higher values only add more FILL invocations at successive token_index "
-        "values, each a separately compiled binary in the module test.",
+        help="--loader spyre only: decode steps to run. The generate loop produces "
+        "two forward shapes -- the padded prompt pass and the per-token pass -- so "
+        "anything >= 2 reaches both; the default leaves one step of margin. Extra "
+        "steps add no new shape, because the KV cache is written by an indirect "
+        "scatter whose index is a tensor, so every decode step looks identical.",
     )
     parser.add_argument(
         "--no_static_cache",

@@ -141,15 +141,7 @@ def _process_batch(
             rec["verified_on_cpu"] = bool(metrics.get("load", False))
             rec["verified_on_spyre"] = bool(metrics.get("correct", False))
             rec["error"] = metrics.get("error") or None
-            metrics_failure_category: str | None = metrics.get("failure_category")
-            if metrics_failure_category is not None:
-                rec["failure_category"] = (
-                    FAILURE_CATEGORY_MOE
-                    if row["is_moe"] is True
-                    else metrics_failure_category
-                )
-            else:
-                rec["failure_category"] = None
+            rec["failure_category"] = metrics.get("failure_category") or None
             if not rec["verified_on_cpu"] and rec["failure_category"] is None:
                 rec["failure_category"] = _classify_failure(
                     rec["error"] or "", FAILURE_CATEGORY_CPU_LOAD_FAILED

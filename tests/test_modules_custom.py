@@ -717,15 +717,12 @@ class TestModuleCustom(TestCase):
         """
         run_compile = os.getenv("TEST_COMPILE_WITH_CPU", "1") == "1"
         run_eager = os.getenv("TEST_EAGER_WITH_CPU", "0") == "1"
-<<<<<<< HEAD
-=======
 
         # A module whose YAML entry sets apply_device_layout: true has its
         # parameters allocated with the adapter path's device layout instead of a
         # plain .to(device), so the device side under test matches production.
         want_layout = getattr(module_info, "apply_device_layout", False)
 
->>>>>>> 22a3d33 (initial commit)
         module_inputs = module_info.module_inputs_func(
             module_info,
             device=device,

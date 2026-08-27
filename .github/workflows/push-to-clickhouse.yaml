@@ -116,9 +116,8 @@ env:
 jobs:
   # ---------------------------------------------------------------------------
   # Fetch the top-K list once per mode, filter it, and shard the survivors for
-  # the parallel matrix job below. No Spyre hardware is needed: the catalog path
-  # uses Hugging Face metadata only. The now-deprecated test_weekly_DEPRECATED.yaml
-  # is existing proof this exact fetch path runs fine on ubuntu-latest.
+  # the parallel matrix job below. No Spyre hardware is needed because the
+  # catalog path uses Hugging Face metadata only.
   #
   # This job DOES need ClickHouse: it writes the terminal verdict rows for
   # everything it filters out. See the header comment.

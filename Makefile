@@ -31,12 +31,13 @@ MODEL_KEY ?=
 # (see tests/conftest.py's pytest_generate_tests), which replaces the
 # registry-derived parametrization outright rather than filtering it -- so it
 # works for any model path, including ones that lost the smallest-per-adapter
-# CAUSAL_PATHS/EMBED_PATHS/VISION_PATHS representative slot. Matrix-style
-# per-model CI jobs pass this (see _test_matrix.yaml); empty = no override.
-MODEL_PATH ?= Qwen/Qwen3-0.6B \
-  mistralai/Ministral-3-8B-Instruct-2512 \
-  ibm-granite/granite-4.1-8b \
-  ibm-granite/granite-3.3-8b-instruct
+# CAUSAL_PATHS/EMBED_PATHS/VISION_PATHS representative slot. Space-separated for
+# multiple models in one invocation. Matrix-style per-model CI jobs pass a
+# single path (see _test_matrix.yaml). An explicit MODEL_PATH always wins;
+# left empty, the `tests` target below falls back to tests/model_lists/<tier>.yaml
+# for tiers that have one (e.g. integration) -- no model names are hardcoded
+# in this file itself, only the tier -> file lookup mechanism.
+MODEL_PATH ?=
 
 # Flags passed verbatim to pytest, mirroring _test_matrix.yaml's extra_test_flags.
 PYTEST_ARGS ?= -s -vvv
@@ -70,7 +71,8 @@ endif
 
 .PHONY: help test tests adapter-coverage-tests smoke-tests load-tests \
         token-compare-tests embed-compare-tests vlm-tests reranker-tests model-module-tests \
-        masked-lm-compare-tests question-answering-compare-tests edge-cases-tests
+        masked-lm-compare-tests question-answering-compare-tests token-classification-compare-tests \
+        edge-cases-tests
 
 help: ## Show this help message
 	@awk 'BEGIN {FS = ":.*?## "} /^[0-9a-zA-Z_-]+:.*?## / {printf "\033[36m%-24s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -116,6 +118,9 @@ masked-lm-compare-tests: ## Run masked-LM compare tests (suite key: masked_lm_co
 
 question-answering-compare-tests: ## Run question-answering compare tests (suite key: question_answering_compare)
 	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_question_answering_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+
+token-classification-compare-tests: ## Run token-classification compare tests (suite key: token_classification_compare)
+	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_token_classification_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 # EDGE_CASE_FILE narrows edge-cases-tests to one file under tests/spyre/edge_cases/
 # (matrix-style per-file CI jobs pass this); empty = run every file in the directory.
@@ -169,10 +174,16 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	@# names / suite keys through unchanged -- same source of truth as
 	@# _test_matrix.yaml's resolve-test-type job, so `make tests TEST_TYPE=unit`
 	@# matches what CI runs for the "unit" tier via GHA.
+	@# An explicit MODEL_PATH always wins; otherwise tests/model_lists/<tier>.yaml (if present) supplies it, so no caller needs to know or pass model names itself.
+	@# Parsed as a flat YAML list (`- path` under a `models:` key) via grep/sed -- no real YAML parser needed for a format this simple.
 	resolved="$$(scripts/resolve_test_type.sh $(TEST_TYPE))"; \
+	model_path="$(MODEL_PATH)"; \
+	if [ -z "$$model_path" ] && [ -f "tests/model_lists/$${resolved}.yaml" ]; then \
+	  model_path="$$(grep -E '^[[:space:]]*-[[:space:]]' "tests/model_lists/$${resolved}.yaml" | sed -E 's/^[[:space:]]*-[[:space:]]*//' | tr '\n' ' ')"; \
+	fi; \
 	case " $$resolved " in \
-	  *" regression "*|*" trunk "*) suites="adapter_coverage smoke load token_compare embed_compare vlm reranker_compare masked_lm_compare question_answering_compare model_module" ;; \
-	  *" unit "*) suites="adapter_coverage load token_compare embed_compare vlm reranker_compare masked_lm_compare question_answering_compare model_module" ;; \
+	  *" regression "*|*" trunk "*) suites="adapter_coverage smoke load token_compare embed_compare vlm reranker_compare masked_lm_compare question_answering_compare token_classification_compare model_module" ;; \
+	  *" unit "*) suites="adapter_coverage load token_compare embed_compare vlm reranker_compare masked_lm_compare question_answering_compare token_classification_compare model_module" ;; \
 	  " integration ") suites="token_compare" ;; \
 	  " perf ") suites="perf" ;; \
 	  " token_compare ") echo "TEST_TYPE=token_compare is not a valid tier -- use TEST_TYPE=integration to run the token_compare suite alone, or include 'token_compare' in a multi-suite combo (e.g. TEST_TYPE=\"token_compare load\")."; exit 1 ;; \
@@ -184,14 +195,15 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	  echo "=== running suite: $$suite ==="; \
 	  case "$$suite" in \
 	    adapter_coverage) mkdir -p "$(RESULTS_DIR)/junit-adapter-coverage" && $(MAKE) adapter-coverage-tests JUNIT_XML="$(RESULTS_DIR)/junit-adapter-coverage/junit-adapter-coverage.xml" || rc=1 ;; \
-	    smoke)            mkdir -p "$(RESULTS_DIR)/junit-smoke" && $(MAKE) smoke-tests            JUNIT_XML="$(RESULTS_DIR)/junit-smoke/junit-smoke.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
-	    load)             mkdir -p "$(RESULTS_DIR)/junit-load" && $(MAKE) load-tests             JUNIT_XML="$(RESULTS_DIR)/junit-load/junit-load.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
-	    token_compare)    mkdir -p "$(RESULTS_DIR)/junit-token-compare" && $(MAKE) token-compare-tests     JUNIT_XML="$(RESULTS_DIR)/junit-token-compare/junit-token-compare.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
-	    embed_compare)    mkdir -p "$(RESULTS_DIR)/junit-embed-compare" && $(MAKE) embed-compare-tests     JUNIT_XML="$(RESULTS_DIR)/junit-embed-compare/junit-embed-compare.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
-	    vlm)              mkdir -p "$(RESULTS_DIR)/junit-vlm" && $(MAKE) vlm-tests               JUNIT_XML="$(RESULTS_DIR)/junit-vlm/junit-vlm.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
-	    reranker_compare) mkdir -p "$(RESULTS_DIR)/junit-reranker-compare" && $(MAKE) reranker-tests          JUNIT_XML="$(RESULTS_DIR)/junit-reranker-compare/junit-reranker-compare.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
-	    masked_lm_compare) mkdir -p "$(RESULTS_DIR)/junit-masked-lm-compare" && $(MAKE) masked-lm-compare-tests JUNIT_XML="$(RESULTS_DIR)/junit-masked-lm-compare/junit-masked-lm-compare.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
-	    question_answering_compare) mkdir -p "$(RESULTS_DIR)/junit-question-answering-compare" && $(MAKE) question-answering-compare-tests JUNIT_XML="$(RESULTS_DIR)/junit-question-answering-compare/junit-question-answering-compare.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
+	    smoke)            mkdir -p "$(RESULTS_DIR)/junit-smoke" && $(MAKE) smoke-tests            JUNIT_XML="$(RESULTS_DIR)/junit-smoke/junit-smoke.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
+	    load)             mkdir -p "$(RESULTS_DIR)/junit-load" && $(MAKE) load-tests             JUNIT_XML="$(RESULTS_DIR)/junit-load/junit-load.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
+	    token_compare)    mkdir -p "$(RESULTS_DIR)/junit-token-compare" && $(MAKE) token-compare-tests     JUNIT_XML="$(RESULTS_DIR)/junit-token-compare/junit-token-compare.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
+	    embed_compare)    mkdir -p "$(RESULTS_DIR)/junit-embed-compare" && $(MAKE) embed-compare-tests     JUNIT_XML="$(RESULTS_DIR)/junit-embed-compare/junit-embed-compare.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
+	    vlm)              mkdir -p "$(RESULTS_DIR)/junit-vlm" && $(MAKE) vlm-tests               JUNIT_XML="$(RESULTS_DIR)/junit-vlm/junit-vlm.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
+	    reranker_compare) mkdir -p "$(RESULTS_DIR)/junit-reranker-compare" && $(MAKE) reranker-tests          JUNIT_XML="$(RESULTS_DIR)/junit-reranker-compare/junit-reranker-compare.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
+	    masked_lm_compare) mkdir -p "$(RESULTS_DIR)/junit-masked-lm-compare" && $(MAKE) masked-lm-compare-tests JUNIT_XML="$(RESULTS_DIR)/junit-masked-lm-compare/junit-masked-lm-compare.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
+	    question_answering_compare) mkdir -p "$(RESULTS_DIR)/junit-question-answering-compare" && $(MAKE) question-answering-compare-tests JUNIT_XML="$(RESULTS_DIR)/junit-question-answering-compare/junit-question-answering-compare.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
+	    token_classification_compare) mkdir -p "$(RESULTS_DIR)/junit-token-classification-compare" && $(MAKE) token-classification-compare-tests JUNIT_XML="$(RESULTS_DIR)/junit-token-classification-compare/junit-token-classification-compare.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
 	    model_module)     $(MAKE) model-module-tests      JUNIT_XML=1 RESULTS_DIR="$(RESULTS_DIR)" MODULE_CONFIG="$(MODULE_CONFIG)" || rc=1; \
 	                      for f in "$(RESULTS_DIR)"/model-module-*.xml; do \
 	                        [ -e "$$f" ] || continue; \
@@ -199,14 +211,14 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	                        mkdir -p "$(RESULTS_DIR)/$$base"; \
 	                        mv "$$f" "$(RESULTS_DIR)/$$base/$$base.xml"; \
 	                      done ;; \
-	    edge_cases)       mkdir -p "$(RESULTS_DIR)/junit-edge-cases" && $(MAKE) edge-cases-tests        JUNIT_XML="$(RESULTS_DIR)/junit-edge-cases/junit-edge-cases.xml" MODEL_KEY="$(MODEL_KEY)" EDGE_CASE_FILE="$(EDGE_CASE_FILE)" || rc=1 ;; \
+	    edge_cases)       mkdir -p "$(RESULTS_DIR)/junit-edge-cases" && $(MAKE) edge-cases-tests        JUNIT_XML="$(RESULTS_DIR)/junit-edge-cases/junit-edge-cases.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" EDGE_CASE_FILE="$(EDGE_CASE_FILE)" || rc=1 ;; \
 	    perf)             printf '%s\n' \
 	                        '<?xml version="1.0" encoding="utf-8"?>' \
 	                        '<testsuites name="hf-adapters-perf">' \
 	                        '  <testsuite name="hf-adapters-perf" tests="0" skipped="0" failures="0" errors="0"/>' \
 	                        '</testsuites>' > "$(RESULTS_DIR)/report.xml"; \
 	                      echo "hf-adapters has no perf harness yet (scaffold stub): wrote placeholder $(RESULTS_DIR)/report.xml" ;; \
-	    *) echo "Unknown suite key '$$suite'. Valid: adapter_coverage smoke load token_compare embed_compare vlm reranker_compare masked_lm_compare question_answering_compare model_module edge_cases perf"; rc=1 ;; \
+	    *) echo "Unknown suite key '$$suite'. Valid: adapter_coverage smoke load token_compare embed_compare vlm reranker_compare masked_lm_compare question_answering_compare token_classification_compare model_module edge_cases perf"; rc=1 ;; \
 	  esac; \
 	done; \
 	exit $$rc

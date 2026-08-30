@@ -51,7 +51,7 @@ Parametrized off ``VISION_MODELS``; selects ``kind="vlm"`` entries.
 Usage (on Spyre pod)::
 
     pytest -s -vvv tests/spyre/test_vlm_e2e_spyre.py
-    pytest -s -vvv tests/spyre/test_vlm_e2e_spyre.py -k granite_vision_mm
+    pytest -s -vvv tests/spyre/test_vlm_e2e_spyre.py -k granite-vision-4.1
 """
 
 import gc

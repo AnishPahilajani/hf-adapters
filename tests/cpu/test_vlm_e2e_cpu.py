@@ -35,22 +35,16 @@ pytest -s -vvv tests/cpu/test_vlm_e2e_cpu.py -k granite_vision_mm
 """
 
 import gc
-import types
 
 import pytest
 import torch
-from transformers import AutoModelForImageTextToText, PreTrainedModel
 
 from hf_adapters.auto_spyre_model import (
     IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING,
+    AutoSpyreModelForImageTextToText,
 )
-from tests._vision_helpers import (
-    build_vlm_batch,
-    extra_image_inputs,
-    stock_vlm_generate,
-)
+from tests._vision_helpers import build_vlm_batch, stock_vlm_generate
 from tests.conftest import (
-    load_ref_model,
     resolve_adapter_module_for_test,
 )
 from tests.cpu.conftest import _set_rope_dtype, _unwrap_compiled_blocks
@@ -60,32 +54,6 @@ pytestmark = pytest.mark.model_harness("vision")
 
 MAX_NEW_TOKENS: int = 16
 PROMPT: str = "Briefly describe this image."
-
-
-def _adapter_generate(
-    adapter: types.ModuleType,
-    model: PreTrainedModel,
-    processor,
-    batch: dict,
-    max_new_tokens: int,
-) -> list[str]:
-    """Drive an adapter's multimodal ``generate`` from a processor batch.
-
-    Adapters take ``input_ids, attention_mask, pixel_values`` positionally and
-    then whatever extra multimodal inputs their model needs; ``extra_image_inputs``
-    forwards those by keyword so this harness stays signature-agnostic across VLM
-    adapters (see ``tests/_vision_helpers``).
-    """
-    return adapter.generate(
-        model,
-        processor,
-        batch["input_ids"],
-        batch["attention_mask"],
-        batch["pixel_values"],
-        max_new_tokens=max_new_tokens,
-        do_sample=False,
-        **extra_image_inputs(adapter.generate, batch),
-    )
 
 
 @pytest.mark.parametrize("model_path", VISION_PATHS, ids=VISION_PATHS)
@@ -101,17 +69,15 @@ def test_vlm_generate(model_path: str) -> None:
     batch["pixel_values"] = batch["pixel_values"].to(dtype)
 
     # --- Adapter generate (greedy) ---
-    model = load_ref_model(
-        model_path=model_path,
-        adapter_mod=adapter,
-        auto_model_cls=AutoModelForImageTextToText,
-    )
-    adapter.prepare_for_spyre(model)
+    model = AutoSpyreModelForImageTextToText.from_pretrained(model_path, dtype=dtype)
     _set_rope_dtype(model, dtype)
     _unwrap_compiled_blocks(model)
     with torch.no_grad():
-        adapter_text = _adapter_generate(
-            adapter, model, processor, batch, MAX_NEW_TOKENS
+        adapter_text = model.generate(
+            processor,
+            max_new_tokens=MAX_NEW_TOKENS,
+            do_sample=False,
+            **batch,
         )
     del model
     gc.collect()

@@ -109,6 +109,14 @@ def get_backbone(model):
     return getattr(inner, "language_model", inner)
 
 
+def embed_text_tokens(model, input_ids):
+    """Embed text token ids using the model backbone's embedding policy."""
+    backbone = get_backbone(model)
+    input_ids = input_ids.to(backbone.embed_tokens.weight.device)
+    hidden_states = backbone.embed_tokens(input_ids)
+    return hidden_states * getattr(backbone, "embedding_multiplier", 1.0)
+
+
 def text_config(config):
     """Return the config carrying the text-decoder dims (``hidden_size``,
     ``head_dim``, ``num_hidden_layers``, ...).
@@ -1558,6 +1566,105 @@ def decode_block_walk(result, num_generated, padded_len, eos_ids, tokenizer):
                 gen_ids = gen_ids[: eos_pos[0].item()]
         results.append(tokenizer.decode(gen_ids, skip_special_tokens=True))
     return results
+
+
+def _generate_from_token_ids(
+    model,
+    tokenizer,
+    input_ids,
+    attention_mask,
+    max_new_tokens,
+    prefill_fn: Callable,
+    decode_fn: Callable,
+    do_sample=None,
+    temperature=None,
+    top_k=None,
+    top_p=None,
+):
+    """Generate from pre-tokenized inputs using model-specific forward callbacks.
+
+    This is the shared generation loop for multimodal adapters. ``prefill_fn``
+    handles the model-specific multimodal prefill, while ``decode_fn`` handles a
+    pure-text, single-token decode step. Both callbacks receive the caches
+    allocated here so all steps share the same cache state.
+    """
+    params = _resolve_generation_params(
+        model,
+        tokenizer,
+        {
+            "do_sample": do_sample,
+            "temperature": temperature,
+            "top_k": top_k,
+            "top_p": top_p,
+        },
+    )
+    do_sample = params["do_sample"]
+    temperature = params["temperature"]
+    top_k = params["top_k"]
+    top_p = params["top_p"]
+    eos_ids = params["eos_ids"]
+
+    batch_size, prompt_length = input_ids.shape
+    actual_prompt_lengths = attention_mask.sum(dim=1)
+    max_cache_len = generation_cache_len(prompt_length, max_new_tokens)
+    input_ids, padded_len, prompt_offsets, position_ids = pad_and_position(
+        input_ids, actual_prompt_lengths
+    )
+
+    model_dtype = get_model_dtype(model)
+    key_caches, value_caches = allocate_kv_caches(
+        model, batch_size, max_cache_len, model_dtype
+    )
+
+    result = input_ids.clone()
+    current_cache_len = padded_len
+    finished = torch.zeros(batch_size, dtype=torch.bool)
+    num_generated = torch.zeros(batch_size, dtype=torch.long)
+
+    for i in range(max_new_tokens):
+        if i == 0:
+            logits = prefill_fn(
+                input_ids,
+                padded_len,
+                prompt_offsets,
+                position_ids,
+                key_caches,
+                value_caches,
+                max_cache_len,
+            )
+        else:
+            next_input = result[:, -1:].to(DEVICE)
+            decode_position_ids = (current_cache_len - prompt_offsets).unsqueeze(1)
+            decode_mask = build_decode_mask(
+                batch_size,
+                max_cache_len,
+                current_cache_len,
+                prompt_offsets,
+                dtype=model_dtype,
+            )
+            logits = decode_fn(
+                next_input,
+                decode_position_ids.to(DEVICE),
+                decode_mask.to(DEVICE),
+                key_caches,
+                value_caches,
+                make_cache_index(current_cache_len, 1, DEVICE),
+            )
+            current_cache_len += 1
+
+        next_logits = logits[:, -1, :].to("cpu")
+        next_tokens = select_next_token(
+            next_logits, do_sample, temperature, top_k, top_p
+        )
+
+        result = torch.cat([result, next_tokens.unsqueeze(1)], dim=1)
+        if eos_ids is not None:
+            finished |= torch.isin(next_tokens, eos_ids)
+        num_generated += (~finished).long()
+        if finished.all():
+            break
+
+    return decode_block_walk(result, num_generated, padded_len, eos_ids, tokenizer)
 
 
 def generate(

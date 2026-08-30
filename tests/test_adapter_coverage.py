@@ -21,6 +21,9 @@ entry in either CAUSAL_LM_MODELS or EMBEDDING_MODELS dictionaries.
 
 from pathlib import Path
 
+from hf_adapters.auto_spyre_model import (
+    IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING,
+)
 from tests.model_registry import (
     CAUSAL_LM_MODELS,
     EMBEDDING_MODELS,
@@ -157,6 +160,18 @@ def test_no_invalid_adapter_references():
         f"{sorted(invalid_references)}\n\n"
         f"Please either create the adapter files or remove the invalid references."
     )
+
+
+def test_vlm_adapters_implement_generation_hooks():
+    """Ensure every VLM adapter implements the generic generation protocol."""
+    required_hooks = {"_prefill_forward", "_logits_from_embeds"}
+    adapter_modules = set(IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING.values())
+
+    for module in adapter_modules:
+        missing = required_hooks - set(vars(module))
+        assert not missing, f"{module.__name__} is missing VLM hooks {sorted(missing)}"
+        for hook in required_hooks:
+            assert callable(getattr(module, hook))
 
 
 def test_adapter_coverage_details():

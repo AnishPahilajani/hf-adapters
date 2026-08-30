@@ -36,7 +36,7 @@ from tests.conftest import load_ref_model
 # ── VLM (image→text) end-to-end helpers ──────────────────────────────────────
 #
 # These drive a full multimodal adapter (both towers) the way an application
-# would: processor → adapter.generate → decoded text, compared against stock's
+# would: processor → bound model.generate → decoded text, compared against stock's
 # real ``model.generate``. They are model-agnostic given a model path — the only
 # convention they bake in is the modern single-call chat-template path, which
 # every current HF VLM processor supports and which (for anyres VLMs like Granite
@@ -64,13 +64,12 @@ def _load_sample_image() -> Image.Image:
 def extra_image_inputs(fn, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     """Batch tensors, beyond the standard three, that ``fn`` declares as params.
 
-    VLM adapters take ``input_ids, attention_mask, pixel_values`` and then
+    VLM prefill hooks take ``input_ids, attention_mask, pixel_values`` and then
     whatever extra image inputs their model needs — Granite Vision / Mistral 3:
     ``image_sizes``; Gemma 4 unified: ``image_position_ids`` +
-    ``mm_token_type_ids``. Matching a processor ``batch`` against the callee's
-    signature (``adapter.generate`` / ``adapter._prefill_forward``) keeps the CPU
-    and Spyre e2e harnesses signature-agnostic across those adapters; the extra
-    tensors are forwarded by keyword.
+    ``mm_token_type_ids``. Matching a processor ``batch`` against
+    ``adapter._prefill_forward`` keeps the teacher-forced Spyre harness
+    signature-agnostic across those adapters.
     """
     accepted = set(inspect.signature(fn).parameters)
     standard = {"input_ids", "attention_mask", "pixel_values"}

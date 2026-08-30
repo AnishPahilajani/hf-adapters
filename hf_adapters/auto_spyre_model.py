@@ -35,6 +35,7 @@ prefill + single-token decode generation loop.
 
 from __future__ import annotations
 
+import inspect
 import os
 from dataclasses import dataclass
 from types import MethodType, ModuleType
@@ -701,13 +702,129 @@ class AutoSpyreModelForTokenClassification(AutoSpyreModel):
         return model
 
 
+def _generate_image_text_to_text(
+    module: ModuleType,
+    model: PreTrainedModel,
+    processor: Any,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    *adapter_args: Any,
+    max_new_tokens: int,
+    do_sample: bool | None = None,
+    temperature: float | None = None,
+    top_k: int | None = None,
+    top_p: float | None = None,
+    **model_inputs: Any,
+):
+    """Run the shared VLM generation loop using an adapter's private hooks."""
+    common_prefill_inputs = {
+        "model",
+        "padded_ids",
+        "padded_len",
+        "prompt_offsets",
+        "position_ids",
+        "key_caches",
+        "value_caches",
+        "max_cache_len",
+    }
+    prefill_signature = inspect.signature(module._prefill_forward)
+    adapter_input_names = [
+        name
+        for name, parameter in prefill_signature.parameters.items()
+        if name not in common_prefill_inputs
+        and parameter.kind
+        not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+    ]
+    if len(adapter_args) > len(adapter_input_names):
+        raise TypeError(
+            f"Too many positional processor inputs for {module.__name__}: "
+            f"expected at most {len(adapter_input_names)}, got {len(adapter_args)}"
+        )
+    for name, value in zip(adapter_input_names, adapter_args):
+        if name in model_inputs:
+            raise TypeError(f"Multiple values for processor input {name!r}")
+        model_inputs[name] = value
+
+    unexpected = set(model_inputs) - set(adapter_input_names)
+    if unexpected:
+        raise TypeError(
+            f"Unsupported processor inputs for {module.__name__}: {sorted(unexpected)}"
+        )
+    adapter_inputs = {
+        name: model_inputs[name] for name in adapter_input_names if name in model_inputs
+    }
+    missing = {
+        name
+        for name in adapter_input_names
+        if name not in adapter_inputs
+        and prefill_signature.parameters[name].default is inspect.Parameter.empty
+    }
+    if missing:
+        raise TypeError(
+            f"Missing processor inputs for {module.__name__}: {sorted(missing)}"
+        )
+
+    def prefill_fn(
+        padded_ids,
+        padded_len,
+        prompt_offsets,
+        position_ids,
+        key_caches,
+        value_caches,
+        max_cache_len,
+    ):
+        return module._prefill_forward(
+            model=model,
+            padded_ids=padded_ids,
+            padded_len=padded_len,
+            prompt_offsets=prompt_offsets,
+            position_ids=position_ids,
+            key_caches=key_caches,
+            value_caches=value_caches,
+            max_cache_len=max_cache_len,
+            **adapter_inputs,
+        )
+
+    def decode_fn(
+        next_input,
+        position_ids,
+        attn_mask,
+        key_caches,
+        value_caches,
+        cache_index,
+    ):
+        return module._logits_from_embeds(
+            model,
+            hf_common.embed_text_tokens(model, next_input),
+            position_ids,
+            attn_mask,
+            key_caches,
+            value_caches,
+            cache_index,
+        )
+
+    return hf_common._generate_from_token_ids(
+        model,
+        processor.tokenizer,
+        input_ids,
+        attention_mask,
+        max_new_tokens,
+        prefill_fn,
+        decode_fn,
+        do_sample=do_sample,
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+    )
+
+
 class AutoSpyreModelForImageTextToText(AutoSpyreModel):
     """Load a multimodal (image-text-to-text) model and prepare BOTH towers.
 
     Selects the combined two-tower adapter (vision tower + text decoder),
     loads the full VLM via ``AutoModelForImageTextToText``, and prepares both
-    for Spyre. Attaches Spyre-aware ``prefill_logits`` (image + text → logits)
-    and ``generate`` (full image→text decode) methods.
+    for Spyre and attaches a Spyre-aware ``generate`` method for full
+    image-to-text decoding.
     """
 
     _auto_model_cls = AutoModelForImageTextToText  # type: ignore[assignment]
@@ -730,38 +847,33 @@ class AutoSpyreModelForImageTextToText(AutoSpyreModel):
             model_name_or_path, dtype=dtype, tp_plan=tp_plan
         )
 
-        def model_prefill_logits(
-            self: PreTrainedModel,
-            input_ids: torch.Tensor,
-            attention_mask: torch.Tensor,
-            pixel_values: torch.Tensor,
-            **kwargs: Any,
-        ):
-            # Extra multimodal inputs vary by model: Granite Vision needs
-            # ``image_sizes`` (anyres tiling); Gemma 4 unified needs
-            # ``image_position_ids`` + ``mm_token_type_ids``. Forward whatever
-            # the processor produced as keyword args so each adapter takes its own.
-            return module.prefill_logits(
-                self, input_ids, attention_mask, pixel_values, **kwargs
-            )
-
         def model_generate(
             self: PreTrainedModel,
             processor: Any,
             input_ids: torch.Tensor,
             attention_mask: torch.Tensor,
-            pixel_values: torch.Tensor,
-            **kwargs: Any,
+            *adapter_args: Any,
+            max_new_tokens: int,
+            do_sample: bool | None = None,
+            temperature: float | None = None,
+            top_k: int | None = None,
+            top_p: float | None = None,
+            **model_inputs: Any,
         ):
-            return module.generate(
+            return _generate_image_text_to_text(
+                module,
                 self,
                 processor,
                 input_ids,
                 attention_mask,
-                pixel_values,
-                **kwargs,
+                *adapter_args,
+                max_new_tokens=max_new_tokens,
+                do_sample=do_sample,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                **model_inputs,
             )
 
-        model.prefill_logits = MethodType(model_prefill_logits, model)  # type: ignore[assignment]
         model.generate = MethodType(model_generate, model)  # type: ignore[assignment]
         return model

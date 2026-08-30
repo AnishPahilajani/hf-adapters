@@ -56,7 +56,6 @@ Usage (on Spyre pod)::
 
 import gc
 import types
-from typing import Any
 
 import pytest
 import torch
@@ -73,6 +72,7 @@ from hf_adapters.hf_common import (
     DEVICE,
     allocate_kv_caches,
     build_decode_mask,
+    embed_text_tokens,
     generation_cache_len,
     get_model_dtype,
     make_cache_index,
@@ -104,26 +104,6 @@ MIN_COSINE = 0.99
 PROMPT = "Briefly describe this image."
 
 
-def _adapter_generate(
-    adapter: types.ModuleType,
-    model: PreTrainedModel,
-    processor: Any,
-    batch: dict[str, torch.Tensor],
-    max_new_tokens: int,
-) -> list[str]:
-    """Drive an adapter's multimodal ``generate`` from a processor batch."""
-    return adapter.generate(
-        model,
-        processor,
-        batch["input_ids"],
-        batch["attention_mask"],
-        batch["pixel_values"],
-        max_new_tokens=max_new_tokens,
-        do_sample=False,
-        **extra_image_inputs(adapter.generate, batch),
-    )
-
-
 def _adapter_teacher_forced_steps(
     adapter: types.ModuleType,
     model: PreTrainedModel,
@@ -138,7 +118,7 @@ def _adapter_teacher_forced_steps(
     ``forced_tokens[i]`` back at each decode step instead of the adapter's own
     argmax — so the adapter sees the *same* prefix as stock and the comparison is
     free of greedy-fork drift. Step 0 is the deepstack prefill (the same
-    ``_prefill_forward`` that ``generate`` / ``prefill_logits`` use).
+    ``_prefill_forward`` that ``generate`` uses).
 
     Returns ``[logits_step0, logits_step1, ...]`` (CPU, ``[vocab]`` each) of
     length ``len(forced_tokens)`` — prefill plus one per forced decode token.
@@ -151,9 +131,6 @@ def _adapter_teacher_forced_steps(
     extra_inputs = extra_image_inputs(adapter._prefill_forward, batch)
 
     model_d_type = get_model_dtype(model)
-    backbone = adapter.get_backbone(model)
-    # Falls back to 1.0 for models (Mistral) that don't scale embeddings
-    emb_mult = getattr(backbone, "embedding_multiplier", 1.0)
 
     batch_size, prompt_length = input_ids.shape
     actual_prompt_lengths = attention_mask.sum(dim=1)
@@ -173,9 +150,6 @@ def _adapter_teacher_forced_steps(
     result = padded_ids.clone()
     current_cache_len = padded_len
     per_step_logits = []
-
-    def embed_ids(ids):
-        return backbone.embed_tokens(ids) * emb_mult
 
     def _write_token(tok_id):
         nonlocal result
@@ -206,7 +180,7 @@ def _adapter_teacher_forced_steps(
     for i in range(1, n_steps):
         # The token to feed is the one appended by the previous step.
         next_input = result[:, -1:].to(DEVICE)
-        next_embeds = embed_ids(next_input)
+        next_embeds = embed_text_tokens(model, next_input)
         # Absolute position of that token per sequence: its cache column minus
         # the sequence's left-padding offset.
         decode_pos = (current_cache_len - prompt_offsets).unsqueeze(1)  # [B, 1]
@@ -342,8 +316,11 @@ def test_vlm_generate_spyre(model_path: str) -> None:
     # Free-run caption — human-eyeball diagnostic + non-degeneracy check only.
     print("  Running adapter free-run generate (diagnostic) ...")
     with torch.no_grad():
-        adapter_text = _adapter_generate(
-            adapter, model, processor, batch, MAX_NEW_TOKENS
+        adapter_text = model.generate(
+            processor,
+            max_new_tokens=MAX_NEW_TOKENS,
+            do_sample=False,
+            **batch,
         )
     del model
     gc.collect()

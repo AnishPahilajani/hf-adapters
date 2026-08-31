@@ -80,13 +80,18 @@ import torch
 from hf_adapters import hf_gemma4
 from hf_adapters.hf_common import (
     DEVICE,
-    build_prefill_mask,
     get_backbone,
     get_model_dtype,
-    make_cache_index,
     patch_layernorm,
     text_config,
 )
+
+_GENERATION_INPUT_NAMES: tuple = (
+    "pixel_values",
+    "image_position_ids",
+    "mm_token_type_ids",
+)
+_GENERATION_TOKEN_ALIGNED_INPUTS: dict = {"mm_token_type_ids": 0}
 
 
 def _vision_embedder(model):
@@ -380,55 +385,43 @@ def _logits_from_embeds(
 
 
 def _prefill_forward(
+    *,
     model,
-    padded_ids,
-    padded_len,
-    prompt_offsets,
+    input_ids,
     position_ids,
+    attention_mask,
+    key_caches,
+    value_caches,
+    cache_index,
     pixel_values,
     image_position_ids,
     mm_token_type_ids,
-    key_caches,
-    value_caches,
-    max_cache_len,
 ):
     """Shared multimodal prefill: padded ids + image → full-sequence logits.
 
     Builds scaled text embeddings with the image features scattered into the
     ``<image>`` slots, then the per-layer-type masks with the bidirectional
     vision overlay OR-ed into both full and sliding layers, and runs the decoder
-    once (writing the KV caches). ``mm_token_type_ids`` is the *unpadded* batch
-    tensor; it is left-padded here to match ``padded_ids``.
+    once (writing the KV caches). ``mm_token_type_ids`` has already undergone
+    the same prompt compaction and block padding as ``input_ids``.
     """
     dtype = get_model_dtype(model)
     cfg = text_config(model.config)
     image_features = _image_features(model, pixel_values, image_position_ids)
-    inputs_embeds = _embed_and_scatter(model, padded_ids, image_features)
+    inputs_embeds = _embed_and_scatter(model, input_ids, image_features)
 
-    mm_padded = _pad_mm_token_type_ids(mm_token_type_ids, padded_len)
-    prefill_mask = build_prefill_mask(
-        padded_ids.shape[0], padded_len, max_cache_len, prompt_offsets, dtype=dtype
-    )
-    blockwise = _blockwise_band(mm_padded, padded_len, max_cache_len, dtype)
-    masks = _build_mm_masks(prefill_mask, blockwise, cfg.sliding_window)
+    padded_len = input_ids.shape[1]
+    max_cache_len = attention_mask.shape[-1]
+    blockwise = _blockwise_band(mm_token_type_ids, padded_len, max_cache_len, dtype)
+    masks = _build_mm_masks(attention_mask, blockwise, cfg.sliding_window)
     masks = {lt: m.to(DEVICE) for lt, m in masks.items()}
     return _logits_from_embeds(
         model,
         inputs_embeds.to(DEVICE),
         position_ids.to(DEVICE),
-        prefill_mask.to(DEVICE),
+        attention_mask.to(DEVICE),
         key_caches,
         value_caches,
-        cache_index=make_cache_index(0, padded_len, DEVICE),
+        cache_index=cache_index,
         masks=masks,
     )
-
-
-def _pad_mm_token_type_ids(mm_token_type_ids, padded_len):
-    """Left-pad ``mm_token_type_ids`` to ``padded_len`` with 0 (text), matching
-    ``pad_and_position``'s left block-pad of ``input_ids``."""
-    bsz, seq = mm_token_type_ids.shape
-    if padded_len == seq:
-        return mm_token_type_ids
-    pad = mm_token_type_ids.new_zeros((bsz, padded_len - seq))
-    return torch.cat([pad, mm_token_type_ids], dim=1)

@@ -39,9 +39,9 @@ prefill + single-token decode generation loop.
 
 from __future__ import annotations
 
-import inspect
 import os
 from dataclasses import dataclass
+from functools import partial
 from types import MethodType, ModuleType
 from typing import Any, Optional, Union
 
@@ -729,119 +729,71 @@ class AutoSpyreModelForTokenClassification(AutoSpyreModel):
         return model
 
 
+def _run_vlm_text_forward(
+    module: ModuleType,
+    model: PreTrainedModel,
+    input_ids: torch.Tensor,
+    position_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    key_caches,
+    value_caches,
+    cache_index: torch.Tensor,
+):
+    """Run one text-only VLM decoder step through the adapter's shared backbone."""
+    return module._logits_from_embeds(
+        model,
+        hf_common.embed_text_tokens(model, input_ids),
+        position_ids,
+        attention_mask,
+        key_caches,
+        value_caches,
+        cache_index,
+    )
+
+
 def _generate_image_text_to_text(
     module: ModuleType,
     model: PreTrainedModel,
-    processor: Any,
     input_ids: torch.Tensor,
-    attention_mask: torch.Tensor,
-    *adapter_args: Any,
-    max_new_tokens: int,
-    do_sample: bool | None = None,
-    temperature: float | None = None,
-    top_k: int | None = None,
-    top_p: float | None = None,
-    **model_inputs: Any,
+    attention_mask: torch.Tensor | None = None,
+    **kwargs: Any,
 ):
-    """Run the shared VLM generation loop using an adapter's private hooks."""
-    common_prefill_inputs = {
-        "model",
-        "padded_ids",
-        "padded_len",
-        "prompt_offsets",
-        "position_ids",
-        "key_caches",
-        "value_caches",
-        "max_cache_len",
-    }
-    prefill_signature = inspect.signature(module._prefill_forward)
-    adapter_input_names = [
-        name
-        for name, parameter in prefill_signature.parameters.items()
-        if name not in common_prefill_inputs
-        and parameter.kind
-        not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
-    ]
-    if len(adapter_args) > len(adapter_input_names):
-        raise TypeError(
-            f"Too many positional processor inputs for {module.__name__}: "
-            f"expected at most {len(adapter_input_names)}, got {len(adapter_args)}"
-        )
-    for name, value in zip(adapter_input_names, adapter_args):
-        if name in model_inputs:
-            raise TypeError(f"Multiple values for processor input {name!r}")
-        model_inputs[name] = value
-
-    unexpected = set(model_inputs) - set(adapter_input_names)
-    if unexpected:
-        raise TypeError(
-            f"Unsupported processor inputs for {module.__name__}: {sorted(unexpected)}"
-        )
-    adapter_inputs = {
-        name: model_inputs[name] for name in adapter_input_names if name in model_inputs
-    }
-    missing = {
-        name
-        for name in adapter_input_names
-        if name not in adapter_inputs
-        and prefill_signature.parameters[name].default is inspect.Parameter.empty
-    }
+    """Run multimodal prefill and text decode through the shared generation loop."""
+    # Processor outputs consumed by this adapter rather than by generation config.
+    adapter_input_names = module._GENERATION_INPUT_NAMES
+    missing = set(adapter_input_names) - set(kwargs)
     if missing:
         raise TypeError(
             f"Missing processor inputs for {module.__name__}: {sorted(missing)}"
         )
+    adapter_inputs = {name: kwargs.pop(name) for name in adapter_input_names}
 
-    def prefill_fn(
-        padded_ids,
-        padded_len,
-        prompt_offsets,
-        position_ids,
-        key_caches,
-        value_caches,
-        max_cache_len,
-    ):
-        return module._prefill_forward(
-            model=model,
-            padded_ids=padded_ids,
-            padded_len=padded_len,
-            prompt_offsets=prompt_offsets,
-            position_ids=position_ids,
-            key_caches=key_caches,
-            value_caches=value_caches,
-            max_cache_len=max_cache_len,
-            **adapter_inputs,
-        )
+    # Inputs keyed by token position need the same compaction/padding as input_ids.
+    # The mapping value is the padding value for each tensor.
+    aligned_specs = module._GENERATION_TOKEN_ALIGNED_INPUTS
+    token_aligned_inputs = {
+        name: (adapter_inputs[name], pad_value)
+        for name, pad_value in aligned_specs.items()
+    }
+    # Image tensors and metadata are passed to prefill unchanged.
+    pass_through_inputs = {
+        name: value
+        for name, value in adapter_inputs.items()
+        if name not in aligned_specs
+    }
 
-    def decode_fn(
-        next_input,
-        position_ids,
-        attn_mask,
-        key_caches,
-        value_caches,
-        cache_index,
-    ):
-        return module._logits_from_embeds(
-            model,
-            hf_common.embed_text_tokens(model, next_input),
-            position_ids,
-            attn_mask,
-            key_caches,
-            value_caches,
-            cache_index,
-        )
+    # Only prefill is multimodal; subsequent decode steps are ordinary text.
+    prefill_fn = partial(module._prefill_forward, **pass_through_inputs)
+    run_forward_fn = partial(_run_vlm_text_forward, module)
 
-    return hf_common._generate_from_token_ids(
+    return hf_common.generate(
+        run_forward_fn,
         model,
-        processor.tokenizer,
         input_ids,
-        attention_mask,
-        max_new_tokens,
-        prefill_fn,
-        decode_fn,
-        do_sample=do_sample,
-        temperature=temperature,
-        top_k=top_k,
-        top_p=top_p,
+        attention_mask=attention_mask,
+        prefill_fn=prefill_fn,
+        token_aligned_inputs=token_aligned_inputs,
+        **kwargs,
     )
 
 
@@ -876,30 +828,16 @@ class AutoSpyreModelForImageTextToText(AutoSpyreModel):
 
         def model_generate(
             self: PreTrainedModel,
-            processor: Any,
             input_ids: torch.Tensor,
-            attention_mask: torch.Tensor,
-            *adapter_args: Any,
-            max_new_tokens: int,
-            do_sample: bool | None = None,
-            temperature: float | None = None,
-            top_k: int | None = None,
-            top_p: float | None = None,
-            **model_inputs: Any,
+            attention_mask: torch.Tensor | None = None,
+            **kwargs: Any,
         ):
             return _generate_image_text_to_text(
                 module,
                 self,
-                processor,
                 input_ids,
-                attention_mask,
-                *adapter_args,
-                max_new_tokens=max_new_tokens,
-                do_sample=do_sample,
-                temperature=temperature,
-                top_k=top_k,
-                top_p=top_p,
-                **model_inputs,
+                attention_mask=attention_mask,
+                **kwargs,
             )
 
         model.generate = MethodType(model_generate, model)  # type: ignore[assignment]

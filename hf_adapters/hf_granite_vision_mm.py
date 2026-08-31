@@ -58,15 +58,16 @@ import torch
 from hf_adapters import hf_siglip_vision
 from hf_adapters.hf_common import (
     DEVICE,
-    build_prefill_mask,
     get_backbone,
     get_model_dtype,
-    make_cache_index,
     pad_lm_head,
     patch_rmsnorm,
     prepare_rope_and_heads,
     prepare_standard_gqa_blocks,
 )
+
+_GENERATION_INPUT_NAMES: tuple = ("pixel_values", "image_sizes")
+_GENERATION_TOKEN_ALIGNED_INPUTS: dict = {}
 
 
 def prepare_for_spyre(model):
@@ -265,16 +266,16 @@ def _run_text_backbone(
 
 
 def _prefill_forward(
+    *,
     model,
-    padded_ids,
-    padded_len,
-    prompt_offsets,
+    input_ids,
     position_ids,
-    pixel_values,
-    image_sizes,
+    attention_mask,
     key_caches,
     value_caches,
-    max_cache_len,
+    cache_index,
+    pixel_values,
+    image_sizes,
 ):
     """The shared multimodal prefill: padded ids + image → first-step logits.
 
@@ -293,26 +294,19 @@ def _prefill_forward(
     # (0 at image positions, 1 elsewhere): masked_fill_ does not lower on the
     # Spyre eager backend, but elementwise mul does. The keep factor is built on
     # CPU (the bool/not op also doesn't lower) then moved to the embeds' device.
-    inputs_embeds = _embed_text(model, padded_ids)
-    vision_mask = _vision_mask(model, padded_ids)
+    inputs_embeds = _embed_text(model, input_ids)
+    vision_mask = _vision_mask(model, input_ids)
     keep = (~vision_mask).to(model_d_type).to(inputs_embeds.device)
     inputs_embeds = inputs_embeds * keep
     deepstack = _deepstack_features(model, pixel_values, image_sizes)
-    prefill_mask = build_prefill_mask(
-        padded_ids.shape[0],
-        padded_len,
-        max_cache_len,
-        prompt_offsets,
-        dtype=model_d_type,
-    )
     return _logits_from_embeds(
         model,
         inputs_embeds.to(DEVICE),
         position_ids.to(DEVICE),
-        prefill_mask.to(DEVICE),
+        attention_mask.to(DEVICE),
         key_caches,
         value_caches,
-        cache_index=make_cache_index(0, padded_len, DEVICE),
+        cache_index=cache_index,
         deepstack=deepstack,
         vision_mask=vision_mask,  # kept on CPU: _inject_deepstack scatters on CPU
     )

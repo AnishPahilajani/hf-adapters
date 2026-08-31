@@ -72,17 +72,14 @@ from hf_adapters.hf_common import (
     DEVICE,
     allocate_kv_caches,
     build_decode_mask,
+    build_prefill_mask,
     embed_text_tokens,
     generation_cache_len,
     get_model_dtype,
     make_cache_index,
-    pad_and_position,
+    normalize_generation_inputs,
 )
-from tests._vision_helpers import (
-    build_vlm_batch,
-    extra_image_inputs,
-    stock_vlm_generate,
-)
+from tests._vision_helpers import build_vlm_batch, stock_vlm_generate
 from tests.conftest import load_ref_model
 from tests.model_registry import (
     NON_BLOCKING_VISION_MODELS,
@@ -125,21 +122,26 @@ def _adapter_teacher_forced_steps(
     """
     input_ids = batch["input_ids"]
     attention_mask = batch["attention_mask"]
-    pixel_values = batch["pixel_values"]
-    # Extra image inputs vary by adapter (Granite/Mistral: image_sizes; Gemma 4:
-    # image_position_ids + mm_token_type_ids); matched against _prefill_forward.
-    extra_inputs = extra_image_inputs(adapter._prefill_forward, batch)
+    adapter_inputs = {name: batch[name] for name in adapter._GENERATION_INPUT_NAMES}
 
     model_d_type = get_model_dtype(model)
 
-    batch_size, prompt_length = input_ids.shape
-    actual_prompt_lengths = attention_mask.sum(dim=1)
+    batch_size = input_ids.shape[0]
     n_steps = len(forced_tokens)
+    normalized = normalize_generation_inputs(input_ids, attention_mask)
+    padded_ids = normalized.input_ids
+    actual_prompt_lengths = normalized.actual_lengths
+    padded_len = normalized.padded_len
+    prompt_offsets = normalized.prompt_offsets
+    position_ids = normalized.position_ids
+    token_aligned_inputs = {
+        name: normalized.normalize_token_aligned(
+            adapter_inputs.pop(name), pad_value=pad_value
+        )
+        for name, pad_value in adapter._GENERATION_TOKEN_ALIGNED_INPUTS.items()
+    }
 
-    max_cache_len = generation_cache_len(prompt_length, n_steps)
-    padded_ids, padded_len, prompt_offsets, position_ids = pad_and_position(
-        input_ids, actual_prompt_lengths
-    )
+    max_cache_len = generation_cache_len(actual_prompt_lengths.max().item(), n_steps)
     key_caches, value_caches = allocate_kv_caches(
         model, batch_size, max_cache_len, model_d_type
     )
@@ -157,20 +159,19 @@ def _adapter_teacher_forced_steps(
         result = torch.cat([result, col], dim=1)
 
     # --- Step 0: multimodal prefill ---
-    # Adapters differ in how many image inputs _prefill_forward takes before the
-    # KV caches (Granite/Mistral: image_sizes; Gemma 4: image_position_ids +
-    # mm_token_type_ids), so pass those + the caches by keyword.
+    prefill_mask = build_prefill_mask(
+        batch_size, padded_len, max_cache_len, prompt_offsets, dtype=model_d_type
+    )
     logits = adapter._prefill_forward(
-        model,
-        padded_ids,
-        padded_len,
-        prompt_offsets,
-        position_ids,
-        pixel_values,
-        **extra_inputs,
+        model=model,
+        input_ids=padded_ids,
+        position_ids=position_ids,
+        attention_mask=prefill_mask,
         key_caches=key_caches,
         value_caches=value_caches,
-        max_cache_len=max_cache_len,
+        cache_index=make_cache_index(0, padded_len, DEVICE),
+        **adapter_inputs,
+        **token_aligned_inputs,
     )
     per_step_logits.append(logits.to("cpu")[0, -1, :].float())
     _write_token(forced_tokens[0])
@@ -315,13 +316,16 @@ def test_vlm_generate_spyre(model_path: str) -> None:
 
     # Free-run caption — human-eyeball diagnostic + non-degeneracy check only.
     print("  Running adapter free-run generate (diagnostic) ...")
+    prompt_len = batch["input_ids"].shape[1]
     with torch.no_grad():
-        adapter_text = model.generate(
-            processor,
+        adapter_sequences = model.generate(
             max_new_tokens=MAX_NEW_TOKENS,
             do_sample=False,
             **batch,
         )
+    adapter_text = tokenizer.decode(
+        adapter_sequences[0, prompt_len:], skip_special_tokens=True
+    )
     del model
     gc.collect()
 
@@ -353,9 +357,9 @@ def test_vlm_generate_spyre(model_path: str) -> None:
             low_cosine.append((label, cosine))
     print(f"  top-1 agreement: {n_top1_match}/{len(ref_logits)} steps (reported)")
     print(f"  stock:   {ref_text!r}")
-    print(f"  adapter free-run: {adapter_text[0]!r}")
+    print(f"  adapter free-run: {adapter_text!r}")
 
-    assert len(adapter_text[0]) > 0, "adapter generated an empty string"
+    assert len(adapter_text) > 0, "adapter generated an empty string"
     assert not low_cosine, (
         f"adapter logits drifted below cosine {MIN_COSINE} (teacher-forced) at: "
         + ", ".join(f"{lab}: {c:.6f}" for lab, c in low_cosine)

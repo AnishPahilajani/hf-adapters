@@ -24,7 +24,8 @@ compiled block functions.
 import math
 import os
 import time
-from typing import Callable, Optional
+from dataclasses import dataclass
+from typing import Any, Callable, Optional
 
 import torch
 import torch.nn as nn
@@ -1594,29 +1595,53 @@ def pad_and_position(input_ids, actual_lengths):
     return input_ids, padded_len, prompt_offsets, position_ids
 
 
+@dataclass
+class NormalizedGenerationInputs:
+    """Block-normalized prompt geometry shared by text and multimodal generation."""
+
+    input_ids: torch.Tensor
+    actual_lengths: torch.Tensor
+    padded_len: int
+    prompt_offsets: torch.Tensor
+    position_ids: torch.Tensor
+    valid_spans: tuple[tuple[int, int], ...]
+    compact_len: int
+    original_shape: tuple[int, int]
+
+    def normalize_token_aligned(self, value, *, pad_value=0):
+        """Apply the prompt's span compaction and block padding to side data."""
+        if not isinstance(value, torch.Tensor):
+            raise TypeError(
+                "token-aligned generation inputs must be torch.Tensor values"
+            )
+        if value.ndim < 2 or tuple(value.shape[:2]) != self.original_shape:
+            raise ValueError(
+                "token-aligned generation inputs must match input_ids in their first two dimensions"
+            )
+
+        value_cpu = value.detach().to("cpu")
+        compact_shape = (self.original_shape[0], self.compact_len, *value.shape[2:])
+        compact = value_cpu.new_full(compact_shape, pad_value)
+        for b, (first, last) in enumerate(self.valid_spans):
+            row = value_cpu[b, first:last]
+            compact[b, self.compact_len - row.shape[0] :] = row
+
+        block_pad = self.padded_len - self.compact_len
+        if block_pad == 0:
+            return compact
+        pad_shape = (self.original_shape[0], block_pad, *value.shape[2:])
+        pad = value_cpu.new_full(pad_shape, pad_value)
+        return torch.cat([pad, compact], dim=1)
+
+
 def normalize_generation_inputs(input_ids, attention_mask=None):
-    """Validate and normalize tokenized decoder inputs for block generation.
-
-    Caller padding is removed according to ``attention_mask``. Each row's real
-    tokens are then right-aligned in a compact batch and left-padded to a
-    ``BLOCK_SIZE`` multiple, which is the physical layout expected by the
-    generation masks and KV-cache scheduler.
-
-    Returns ``(padded_ids, actual_lengths, padded_len, prompt_offsets,
-    position_ids)``. Inputs are copied to CPU and are not modified.
-    """
+    """Validate and normalize tokenized decoder inputs for block generation."""
     if not isinstance(input_ids, torch.Tensor):
         raise TypeError("input_ids must be a torch.Tensor")
     if input_ids.ndim != 2:
         raise ValueError("input_ids must have shape [batch_size, sequence_length]")
-    if input_ids.dtype not in (
-        torch.uint8,
-        torch.int8,
-        torch.int16,
-        torch.int32,
-        torch.int64,
-    ):
-        raise TypeError("input_ids must have an integer dtype")
+    if input_ids.dtype not in (torch.int32, torch.int64):
+        raise TypeError("input_ids must have integer dtype torch.int32 or torch.int64")
 
     batch_size, sequence_length = input_ids.shape
     if batch_size == 0:
@@ -1649,16 +1674,18 @@ def normalize_generation_inputs(input_ids, attention_mask=None):
     if torch.any(actual_lengths == 0):
         raise ValueError("each input sequence must contain at least one unmasked token")
 
+    valid_spans = []
     valid_rows = []
     for b in range(batch_size):
         valid_indices = mask[b].nonzero(as_tuple=True)[0]
         first = valid_indices[0].item()
-        last = valid_indices[-1].item()
-        if last - first + 1 != actual_lengths[b].item():
+        last = valid_indices[-1].item() + 1
+        if last - first != actual_lengths[b].item():
             raise ValueError(
                 "attention_mask must contain one contiguous span of unmasked tokens per row"
             )
-        valid_rows.append(input_ids_cpu[b, first : last + 1])
+        valid_spans.append((first, last))
+        valid_rows.append(input_ids_cpu[b, first:last])
 
     compact_len = actual_lengths.max().item()
     compact_ids = input_ids_cpu.new_zeros((batch_size, compact_len))
@@ -1668,12 +1695,15 @@ def normalize_generation_inputs(input_ids, attention_mask=None):
     padded_ids, padded_len, prompt_offsets, position_ids = pad_and_position(
         compact_ids, actual_lengths
     )
-    return (
-        padded_ids,
-        actual_lengths,
-        padded_len,
-        prompt_offsets,
-        position_ids,
+    return NormalizedGenerationInputs(
+        input_ids=padded_ids,
+        actual_lengths=actual_lengths,
+        padded_len=padded_len,
+        prompt_offsets=prompt_offsets,
+        position_ids=position_ids,
+        valid_spans=tuple(valid_spans),
+        compact_len=compact_len,
+        original_shape=(batch_size, sequence_length),
     )
 
 
@@ -1738,136 +1768,8 @@ def select_next_token(
     return (tokens, scores) if return_scores else tokens
 
 
-def decode_block_walk(result, num_generated, padded_len, eos_ids, tokenizer):
-    """Per-sequence generated slots → EOS-trimmed decoded strings.
-
-    Single-token decode steps append contiguously, so each sequence's generated
-    tokens are ``result[b, padded_len : padded_len + num_generated[b]]`` — no gaps.
-    """
-    results = []
-    for b in range(result.shape[0]):
-        n = int(num_generated[b].item())
-        gen_ids = result[b, padded_len : padded_len + n]
-        if eos_ids is not None:
-            eos_pos = torch.isin(gen_ids, eos_ids).nonzero(as_tuple=True)[0]
-            if len(eos_pos) > 0:
-                gen_ids = gen_ids[: eos_pos[0].item()]
-        results.append(tokenizer.decode(gen_ids, skip_special_tokens=True))
-    return results
-
-
-def _generate_from_token_ids(
-    model,
-    tokenizer,
-    input_ids,
-    attention_mask,
-    max_new_tokens,
-    prefill_fn: Callable,
-    decode_fn: Callable,
-    do_sample=None,
-    temperature=None,
-    top_k=None,
-    top_p=None,
-    generation_config=None,
-):
-    """Generate from pre-tokenized inputs using model-specific forward callbacks.
-
-    This is the shared generation loop for multimodal adapters. ``prefill_fn``
-    handles the model-specific multimodal prefill, while ``decode_fn`` handles a
-    pure-text, single-token decode step. Both callbacks receive the caches
-    allocated here so all steps share the same cache state.
-    """
-    cfg, eos_ids, _ = _resolve_generation_params(
-        model,
-        generation_config,
-        {
-            "do_sample": do_sample,
-            "temperature": temperature,
-            "top_k": top_k,
-            "top_p": top_p,
-        },
-        {},
-    )
-
-    batch_size, prompt_length = input_ids.shape
-    actual_prompt_lengths = attention_mask.sum(dim=1)  # [B]
-    begin_suppress_index = generation_begin_index(
-        prompt_length, cfg.forced_bos_token_id
-    )
-
-    max_cache_len = generation_cache_len(prompt_length, max_new_tokens)
-    input_ids, padded_len, prompt_offsets, position_ids = pad_and_position(
-        input_ids, actual_prompt_lengths
-    )
-
-    model_dtype = get_model_dtype(model)
-    key_caches, value_caches = allocate_kv_caches(
-        model, batch_size, max_cache_len, model_dtype
-    )
-
-    result = input_ids.clone()
-    current_cache_len = padded_len
-    finished = torch.zeros(batch_size, dtype=torch.bool)
-    num_generated = torch.zeros(batch_size, dtype=torch.long)
-
-    for i in range(max_new_tokens):
-        if i == 0:
-            logits = prefill_fn(
-                input_ids,
-                padded_len,
-                prompt_offsets,
-                position_ids,
-                key_caches,
-                value_caches,
-                max_cache_len,
-            )
-        else:
-            next_input = result[:, -1:].to(DEVICE)
-            decode_position_ids = (current_cache_len - prompt_offsets).unsqueeze(1)
-            decode_mask = build_decode_mask(
-                batch_size,
-                max_cache_len,
-                current_cache_len,
-                prompt_offsets,
-                dtype=model_dtype,
-            )
-            logits = decode_fn(
-                next_input,
-                decode_position_ids.to(DEVICE),
-                decode_mask.to(DEVICE),
-                key_caches,
-                value_caches,
-                make_cache_index(current_cache_len, 1, DEVICE),
-            )
-            current_cache_len += 1
-
-        next_logits = logits[:, -1, :].to("cpu")
-        next_tokens, processed_scores = select_next_token(
-            next_logits,
-            cfg.do_sample,
-            cfg.temperature,
-            cfg.top_k,
-            cfg.top_p,
-            cfg.suppress_tokens,
-            cfg.begin_suppress_tokens,
-            cfg.forced_bos_token_id,
-            current_length=prompt_length + i,
-            begin_suppress_index=begin_suppress_index,
-            return_scores=True,
-        )
-
-        result = torch.cat([result, next_tokens.unsqueeze(1)], dim=1)
-        if eos_ids is not None:
-            finished |= torch.isin(next_tokens, eos_ids)
-        num_generated += (~finished).long()
-        if finished.all():
-            break
-
-    return decode_block_walk(result, num_generated, padded_len, eos_ids, tokenizer)
-
-
 def generate(
-    run_forward_fn: Callable,
+    run_forward_fn: Optional[Callable],
     model,
     input_ids,
     max_new_tokens=None,
@@ -1882,6 +1784,9 @@ def generate(
     top_p=None,
     eos_token_id=_UNSET,
     timing=False,
+    prefill_fn: Optional[Callable] = None,
+    decode_fn: Optional[Callable] = None,
+    token_aligned_inputs: Optional[dict[str, tuple[torch.Tensor, Any]]] = None,
     **kwargs,
 ):
     """Model-agnostic generation from tokenized inputs with single-token decode.
@@ -1963,14 +1868,17 @@ def generate(
         model, generation_config, overrides, kwargs
     )
 
+    normalized = normalize_generation_inputs(input_ids, attention_mask)
     orig_input_ids = input_ids.detach().to("cpu").clone()
-    (
-        input_ids,
-        actual_prompt_lengths,
-        padded_len,
-        prompt_offsets,
-        position_ids,
-    ) = normalize_generation_inputs(orig_input_ids, attention_mask)
+    input_ids = normalized.input_ids
+    actual_prompt_lengths = normalized.actual_lengths
+    padded_len = normalized.padded_len
+    prompt_offsets = normalized.prompt_offsets
+    position_ids = normalized.position_ids
+    normalized_token_inputs = {
+        name: normalized.normalize_token_aligned(value, pad_value=pad_value)
+        for name, (value, pad_value) in (token_aligned_inputs or {}).items()
+    }
 
     input_length = orig_input_ids.shape[1]
     cfg = model._prepare_generated_length(
@@ -1989,6 +1897,11 @@ def generate(
     effective_max_new_tokens = cfg.max_length - input_length
     min_new_tokens = cfg.min_new_tokens or 0
     begin_suppress_index = generation_begin_index(input_length, cfg.forced_bos_token_id)
+
+    if prefill_fn is None and run_forward_fn is None:
+        raise ValueError("run_forward_fn or prefill_fn must be provided")
+    if decode_fn is None and run_forward_fn is None and effective_max_new_tokens > 1:
+        raise ValueError("run_forward_fn or decode_fn must be provided")
 
     batch_size = input_ids.shape[0]
     vocab_size = text_config(model.config).vocab_size
@@ -2033,15 +1946,28 @@ def generate(
                 prompt_offsets,
                 dtype=model_d_type,
             )
-            logits = run_forward_fn(
-                model,
-                input_ids.to(DEVICE),
-                position_ids.to(DEVICE),
-                prefill_mask.to(DEVICE),
-                key_caches,
-                value_caches,
-                cache_index=make_cache_index(0, padded_len, DEVICE),
-            )
+            cache_index = make_cache_index(0, padded_len, DEVICE)
+            if prefill_fn is None:
+                logits = run_forward_fn(  # type: ignore[misc]
+                    model,
+                    input_ids.to(DEVICE),
+                    position_ids.to(DEVICE),
+                    prefill_mask.to(DEVICE),
+                    key_caches,
+                    value_caches,
+                    cache_index=cache_index,
+                )
+            else:
+                logits = prefill_fn(
+                    model=model,
+                    input_ids=input_ids,
+                    position_ids=position_ids,
+                    attention_mask=prefill_mask,
+                    key_caches=key_caches,
+                    value_caches=value_caches,
+                    cache_index=cache_index,
+                    **normalized_token_inputs,
+                )
             logits_cpu = logits.to("cpu")
             next_logits = logits_cpu[:, -1, :]
             current_cache_len = padded_len
@@ -2061,15 +1987,27 @@ def generate(
                 prompt_offsets,
                 dtype=model_d_type,
             )
-            logits = run_forward_fn(
-                model,
-                next_input,
-                decode_pos.to(DEVICE),
-                decode_mask.to(DEVICE),
-                key_caches,
-                value_caches,
-                cache_index=make_cache_index(current_cache_len, 1, DEVICE),
-            )
+            cache_index = make_cache_index(current_cache_len, 1, DEVICE)
+            if decode_fn is None:
+                logits = run_forward_fn(  # type: ignore[misc]
+                    model,
+                    next_input,
+                    decode_pos.to(DEVICE),
+                    decode_mask.to(DEVICE),
+                    key_caches,
+                    value_caches,
+                    cache_index=cache_index,
+                )
+            else:
+                logits = decode_fn(
+                    model=model,
+                    input_ids=next_input,
+                    position_ids=decode_pos.to(DEVICE),
+                    attention_mask=decode_mask.to(DEVICE),
+                    key_caches=key_caches,
+                    value_caches=value_caches,
+                    cache_index=cache_index,
+                )
             logits_cpu = logits.to("cpu")
             next_logits = logits_cpu[:, -1, :]
             current_cache_len += 1

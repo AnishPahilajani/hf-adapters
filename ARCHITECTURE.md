@@ -269,7 +269,9 @@ batch = processor.apply_chat_template(
     conv, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt"
 )
 
-texts = model.generate(processor, **batch, max_new_tokens=64)
+sequences = model.generate(**batch, max_new_tokens=64)
+prompt_len = batch["input_ids"].shape[1]
+texts = processor.batch_decode(sequences[:, prompt_len:], skip_special_tokens=True)
 ```
 
 `AutoSpyreModelForImageTextToText` loads the full VLM via

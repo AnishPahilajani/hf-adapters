@@ -68,21 +68,8 @@ def test_vlm_generate(model_path: str) -> None:
     processor, batch = build_vlm_batch(model_path, PROMPT)
     batch["pixel_values"] = batch["pixel_values"].to(dtype)
 
-    # --- Adapter generate (greedy) ---
-    model = AutoSpyreModelForImageTextToText.from_pretrained(model_path, dtype=dtype)
-    _set_rope_dtype(model, dtype)
-    _unwrap_compiled_blocks(model)
-    with torch.no_grad():
-        adapter_text = model.generate(
-            processor,
-            max_new_tokens=MAX_NEW_TOKENS,
-            do_sample=False,
-            **batch,
-        )
-    del model
-    gc.collect()
-
     # --- Stock reference: the FULL model.generate() (real deepstack) ---
+    # Run this before adapter preparation, which patches model classes globally.
     ref_text = stock_vlm_generate(
         model_path=model_path,
         processor=processor,
@@ -92,15 +79,32 @@ def test_vlm_generate(model_path: str) -> None:
     )
     gc.collect()
 
+    # --- Adapter generate (greedy) ---
+    model = AutoSpyreModelForImageTextToText.from_pretrained(model_path, dtype=dtype)
+    _set_rope_dtype(model, dtype)
+    _unwrap_compiled_blocks(model)
+    prompt_len = batch["input_ids"].shape[1]
+    with torch.no_grad():
+        adapter_sequences = model.generate(
+            max_new_tokens=MAX_NEW_TOKENS,
+            do_sample=False,
+            **batch,
+        )
+    adapter_text = processor.tokenizer.decode(
+        adapter_sequences[0, prompt_len:], skip_special_tokens=True
+    )
+    del model
+    gc.collect()
+
     # Print both captions so a human can eyeball the result (visible with -s).
     print(f"\n[{model_path} e2e] prompt: {PROMPT!r}")
-    print(f"[{model_path} e2e] adapter: {adapter_text[0]!r}")
+    print(f"[{model_path} e2e] adapter: {adapter_text!r}")
     print(f"[{model_path} e2e] stock:   {ref_text!r}")
 
     # The adapter must match stock's REAL multimodal generate token-for-token.
-    assert adapter_text[0] == ref_text, (
+    assert adapter_text == ref_text, (
         f"adapter generate diverged from stock generate:\n"
-        f"  adapter: {adapter_text[0]!r}\n"
+        f"  adapter: {adapter_text!r}\n"
         f"  stock:   {ref_text!r}"
     )
-    assert len(adapter_text[0]) > 0, "adapter generated an empty string"
+    assert len(adapter_text) > 0, "adapter generated an empty string"

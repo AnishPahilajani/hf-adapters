@@ -169,7 +169,11 @@ def test_no_invalid_adapter_references():
 
 def test_vlm_adapters_implement_generation_hooks():
     """Ensure every VLM adapter implements the generic generation protocol."""
-    required_hooks = {"_prefill_forward", "_logits_from_embeds"}
+    required_functions = {"_prefill_forward", "_logits_from_embeds"}
+    required_metadata = {
+        "_GENERATION_INPUT_NAMES",
+        "_GENERATION_TOKEN_ALIGNED_INPUTS",
+    }
     adapter_files = {
         info["adapter"] for info in VISION_MODELS.values() if info.get("kind") == "vlm"
     }
@@ -182,8 +186,18 @@ def test_vlm_adapters_implement_generation_hooks():
             for node in tree.body
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         }
-        missing = required_hooks - functions
-        assert not missing, f"{adapter_file} is missing VLM hooks {sorted(missing)}"
+        metadata = {
+            target.id
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            for target in node.targets
+            if isinstance(target, ast.Name)
+        }
+        missing = (required_functions - functions) | (required_metadata - metadata)
+        assert not missing, (
+            f"{adapter_file} is missing VLM generation protocol members "
+            f"{sorted(missing)}"
+        )
 
 
 def test_adapter_coverage_details():

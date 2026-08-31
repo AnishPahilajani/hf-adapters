@@ -345,8 +345,3 @@ def _prefill_forward(
         image_features=image_feats,  # on CPU; _inject_image_features moves it
         vision_mask=vision_mask,  # on CPU
     )
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------

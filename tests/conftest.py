@@ -45,7 +45,7 @@ import importlib.util
 import os
 import sys
 import types
-from typing import Union
+from typing import Any, Union
 
 import pytest
 from _pytest.config import Config
@@ -145,6 +145,19 @@ from hf_adapters.auto_spyre_model import (  # noqa: E402
 )
 
 
+def encode_generation_inputs(tokenizer: Any, prompts: list[str]):
+    """Tokenize a generation batch with ordinary right padding."""
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "right"
+    return tokenizer(
+        prompts,
+        return_tensors="pt",
+        padding=True,
+        return_attention_mask=True,
+    )
+
+
 def pytest_configure(config: Config) -> None:
     config.addinivalue_line(
         "markers",
@@ -221,6 +234,7 @@ def pytest_generate_tests(metafunc: Metafunc) -> None:
         "masked_lm": {},
         "question_answering": {},
         "reranker": {},
+        "seq_classification": {},
         "token_classification": {},
     }
     try:

@@ -193,6 +193,11 @@ def test_vlm_adapters_implement_generation_hooks():
             for target in node.targets
             if isinstance(target, ast.Name)
         }
+        metadata.update(
+            node.target.id
+            for node in tree.body
+            if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+        )
         missing = (required_functions - functions) | (required_metadata - metadata)
         assert not missing, (
             f"{adapter_file} is missing VLM generation protocol members "

@@ -39,6 +39,7 @@ import torch
 from transformers import AutoTokenizer
 
 from tests.conftest import (
+    encode_generation_inputs,
     load_ref_model,
     resolve_adapter_module_for_test,
 )
@@ -167,8 +168,15 @@ def test_auto_loader(model_path):
     # Phase 1: auto-loader generate
     model = auto_spyre_model.AutoSpyreModelForCausalLM.from_pretrained(model_path)
     _unwrap_compiled_blocks(model)
-    auto_outputs = model.generate(
-        tokenizer, [PROMPT], max_new_tokens=NUM_DECODE, do_sample=False
+    encoded = encode_generation_inputs(tokenizer, [PROMPT])
+    auto_sequences = model.generate(
+        **encoded,
+        max_new_tokens=NUM_DECODE,
+        do_sample=False,
+    )
+    auto_outputs = tokenizer.batch_decode(
+        auto_sequences[:, encoded["input_ids"].shape[1] :],
+        skip_special_tokens=True,
     )
     del model
     gc.collect()

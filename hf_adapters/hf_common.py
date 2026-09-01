@@ -1509,12 +1509,22 @@ def load_model_common(
         auto_model_cls = AutoModel
 
     if tp_plan is not None and hasattr(module, "load_hf_model"):
-        raise SpyreUnsupportedModelError(
-            "tensor-parallel loading is not supported by this adapter's custom loader"
-        )
+        # Check whether this adapter's custom loader explicitly supports tp_plan
+        # (by accepting it as a kwarg). Adapters that don't support TP still raise.
+        import inspect as _inspect
+        _sig = _inspect.signature(module.load_hf_model)
+        if "tp_plan" not in _sig.parameters:
+            raise SpyreUnsupportedModelError(
+                "tensor-parallel loading is not supported by this adapter's custom loader"
+            )
 
     if hasattr(module, "load_hf_model"):
-        model = module.load_hf_model(model_path, dtype)
+        import inspect as _inspect
+        _sig = _inspect.signature(module.load_hf_model)
+        if tp_plan is not None and "tp_plan" in _sig.parameters:
+            model = module.load_hf_model(model_path, dtype, tp_plan=tp_plan)
+        else:
+            model = module.load_hf_model(model_path, dtype)
     elif tp_plan is not None:
         from transformers.distributed import DistributedConfig
 
@@ -1545,6 +1555,8 @@ def move_model_to_spyre(model, module, dtype: torch.dtype) -> None:
     _move_to_spyre_with_layout(model, dtype)
     for submod_name in getattr(model, "_spyre_cpu_submodules", []):
         model.get_submodule(submod_name).to("cpu")
+    if callable(getattr(model, "_spyre_post_move", None)):
+        model._spyre_post_move()
     print("Model on Spyre ready.")
 
 

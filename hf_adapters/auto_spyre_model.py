@@ -93,12 +93,14 @@ from transformers.modeling_outputs import (
     SequenceClassifierOutput,
     TokenClassifierOutput,
 )
+from transformers.models.diffusion_gemma.configuration_diffusion_gemma import DiffusionGemmaConfig
 from transformers.models.ministral.configuration_ministral import MinistralConfig
 from transformers.models.mistral3.configuration_mistral3 import Mistral3Config
 
 import hf_adapters.hf_common as hf_common
 from hf_adapters import (
     hf_bert,
+    hf_diffusion_gemma,
     hf_distilbert,
     hf_dspark_gemma4,
     hf_dspark_granite,
@@ -144,6 +146,7 @@ from hf_adapters.hf_common import (
 
 CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     BertConfig: hf_bert,
+    DiffusionGemmaConfig: hf_diffusion_gemma,
     DistilBertConfig: hf_distilbert,
     Gemma2Config: hf_gemma2,
     Gemma3Config: hf_gemma3,
@@ -252,7 +255,10 @@ def dtype_for_model_path(
     elif policy.dtype is not None:
         dtype = policy.dtype
     else:
-        config = AutoConfig.from_pretrained(model_name_or_path)
+        _local = os.path.isdir(model_name_or_path)
+        config = AutoConfig.from_pretrained(
+            model_name_or_path, local_files_only=_local
+        )
         dtype = getattr(config, "dtype", None) or torch.float16
 
     if dtype == torch.float32 and device_str == "spyre":
@@ -268,8 +274,11 @@ def resolve_adapter_module(
     ] = CONFIG_TO_ADAPTER_MODULE_MAPPING,
     trust_remote_code: bool | None = None,
 ) -> ModuleType:
+    _local = os.path.isdir(model_name_or_path)
     model_config: PretrainedConfig = AutoConfig.from_pretrained(
-        model_name_or_path, trust_remote_code=trust_remote_code
+        model_name_or_path,
+        trust_remote_code=trust_remote_code,
+        local_files_only=_local,
     )
 
     # Architecture-name dispatch first: DSpark drafters share their base model's
@@ -365,10 +374,18 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
 
         def model_generate(
             self: PreTrainedModel,
-            input_ids: torch.Tensor,
-            attention_mask: torch.Tensor | None = None,
+            input_ids_or_tokenizer: Any,
+            prompts_or_attention_mask: Any = None,
             **kwargs: Any,
         ):
+            # DiffusionGemma uses a block-diffusion loop, not the standard AR generate.
+            if module is hf_diffusion_gemma:
+                return hf_diffusion_gemma.generate(
+                    self, input_ids_or_tokenizer, prompts_or_attention_mask, **kwargs
+                )
+            input_ids = input_ids_or_tokenizer
+            attention_mask = prompts_or_attention_mask
+
             from hf_adapters.hf_common import generate
 
             return generate(

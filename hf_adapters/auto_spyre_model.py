@@ -93,7 +93,9 @@ from transformers.modeling_outputs import (
     SequenceClassifierOutput,
     TokenClassifierOutput,
 )
-from transformers.models.diffusion_gemma.configuration_diffusion_gemma import DiffusionGemmaConfig
+from transformers.models.diffusion_gemma.configuration_diffusion_gemma import (
+    DiffusionGemmaConfig,
+)
 from transformers.models.ministral.configuration_ministral import MinistralConfig
 from transformers.models.mistral3.configuration_mistral3 import Mistral3Config
 
@@ -256,9 +258,7 @@ def dtype_for_model_path(
         dtype = policy.dtype
     else:
         _local = os.path.isdir(model_name_or_path)
-        config = AutoConfig.from_pretrained(
-            model_name_or_path, local_files_only=_local
-        )
+        config = AutoConfig.from_pretrained(model_name_or_path, local_files_only=_local)
         dtype = getattr(config, "dtype", None) or torch.float16
 
     if dtype == torch.float32 and device_str == "spyre":

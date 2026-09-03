@@ -257,8 +257,7 @@ def dtype_for_model_path(
     elif policy.dtype is not None:
         dtype = policy.dtype
     else:
-        _local = os.path.isdir(model_name_or_path)
-        config = AutoConfig.from_pretrained(model_name_or_path, local_files_only=_local)
+        config = AutoConfig.from_pretrained(model_name_or_path)
         dtype = getattr(config, "dtype", None) or torch.float16
 
     if dtype == torch.float32 and device_str == "spyre":
@@ -274,11 +273,8 @@ def resolve_adapter_module(
     ] = CONFIG_TO_ADAPTER_MODULE_MAPPING,
     trust_remote_code: bool | None = None,
 ) -> ModuleType:
-    _local = os.path.isdir(model_name_or_path)
     model_config: PretrainedConfig = AutoConfig.from_pretrained(
-        model_name_or_path,
-        trust_remote_code=trust_remote_code,
-        local_files_only=_local,
+        model_name_or_path, trust_remote_code=trust_remote_code
     )
 
     # Architecture-name dispatch first: DSpark drafters share their base model's
@@ -374,17 +370,12 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
 
         def model_generate(
             self: PreTrainedModel,
-            input_ids_or_tokenizer: Any,
-            prompts_or_attention_mask: Any = None,
+            input_ids: torch.Tensor,
+            attention_mask: torch.Tensor | None = None,
             **kwargs: Any,
         ):
-            # DiffusionGemma uses a block-diffusion loop, not the standard AR generate.
-            if module is hf_diffusion_gemma:
-                return hf_diffusion_gemma.generate(
-                    self, input_ids_or_tokenizer, prompts_or_attention_mask, **kwargs
-                )
-            input_ids = input_ids_or_tokenizer
-            attention_mask = prompts_or_attention_mask
+            if hasattr(module, "generate"):
+                return module.generate(self, input_ids, attention_mask, **kwargs)
 
             from hf_adapters.hf_common import generate
 

@@ -12,24 +12,44 @@ parser = argparse.ArgumentParser(
     description="Block-diffusion inference script for DiffusionGemma on Spyre.",
     formatter_class=argparse.RawDescriptionHelpFormatter,
 )
-parser.add_argument("--model", default="/models/diffusiongemma-26B-A4B-it",
-                    help="HuggingFace repo ID or local model path.")
+parser.add_argument(
+    "--model",
+    default="/models/diffusiongemma-26B-A4B-it",
+    help="HuggingFace repo ID or local model path.",
+)
 parser.add_argument("--prompt", default="Why is the sky blue?")
 parser.add_argument("--max-new-tokens", type=int, default=256)
-parser.add_argument("--max-denoising-steps", type=int, default=48,
-                    help="Denoising steps per canvas (default 48). "
-                         "Early stopping usually fires well before this — "
-                         "lower values trade quality for speed.")
-parser.add_argument("--tp", action="store_true",
-                    help="Enable tensor parallelism via DistributedConfig. "
-                         "Requires torchrun --nproc_per_node >= 2.")
-parser.add_argument("--no-warmup", action="store_true",
-                    help="Skip warmup run (use when inductor cache is already warm).")
-parser.add_argument("--batch-size", type=int, default=1,
-                    help="Number of identical prompts to batch together (default 1).")
-parser.add_argument("--dtype", default="bfloat16",
-                    choices=["bfloat16", "float16"],
-                    help="Model dtype (default bfloat16).")
+parser.add_argument(
+    "--max-denoising-steps",
+    type=int,
+    default=48,
+    help="Denoising steps per canvas (default 48). "
+    "Early stopping usually fires well before this — "
+    "lower values trade quality for speed.",
+)
+parser.add_argument(
+    "--tp",
+    action="store_true",
+    help="Enable tensor parallelism via DistributedConfig. "
+    "Requires torchrun --nproc_per_node >= 2.",
+)
+parser.add_argument(
+    "--no-warmup",
+    action="store_true",
+    help="Skip warmup run (use when inductor cache is already warm).",
+)
+parser.add_argument(
+    "--batch-size",
+    type=int,
+    default=1,
+    help="Number of identical prompts to batch together (default 1).",
+)
+parser.add_argument(
+    "--dtype",
+    default="bfloat16",
+    choices=["bfloat16", "float16"],
+    help="Model dtype (default bfloat16).",
+)
 args = parser.parse_args()
 
 # Give each rank its own inductor cache to avoid bundle-path collisions.
@@ -71,7 +91,10 @@ gen_kwargs = dict(
 # blocks). Must be excluded from the throughput measurement.
 if not args.no_warmup:
     if local_rank == 0:
-        print(f"Warming up (compiling graphs, max_denoising_steps={args.max_denoising_steps})...", flush=True)
+        print(
+            f"Warming up (compiling graphs, max_denoising_steps={args.max_denoising_steps})...",
+            flush=True,
+        )
     model.generate(input_ids, attention_mask, **gen_kwargs)
     if local_rank == 0:
         print("Warmup done.", flush=True)
@@ -88,6 +111,7 @@ elapsed = time.perf_counter() - t0
 # nonzero entries are actual generated token ids (including EOS).
 if local_rank == 0:
     from hf_adapters.hf_common import text_config
+
     num_layers = text_config(model.config).num_hidden_layers
     for b in range(args.batch_size):
         output_text = tokenizer.decode(output_ids[b], skip_special_tokens=True)
@@ -104,6 +128,8 @@ if local_rank == 0:
         print(f"  throughput          : {toks_per_sec:.1f} tok/s")
         print()
     print("NOTE: throughput is dominated by Spyre<->CPU MoE round-trips.")
-    print(f"  {args.max_denoising_steps} steps x {num_layers} layers x 2 transfers/layer")
+    print(
+        f"  {args.max_denoising_steps} steps x {num_layers} layers x 2 transfers/layer"
+    )
     print(f"  = {args.max_denoising_steps * num_layers * 2} PCIe transfers per canvas.")
     print("  Reduce --max-denoising-steps to trade quality for speed.")

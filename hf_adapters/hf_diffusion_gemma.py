@@ -121,7 +121,6 @@ from hf_adapters.hf_common import (
     text_config,
 )
 
-
 # ---------------------------------------------------------------------------
 # RMSNorm patch (Gemma4-style: ``self.eps``, optionally scale-free)
 # ---------------------------------------------------------------------------
@@ -181,9 +180,7 @@ class _DiffGemmaAttn(nn.Module):
     the compiled graph as ``spyre.all_reduce_async``.
     """
 
-    def __init__(
-        self, attn, head_dim, is_kv_eq_v, encoder_mode: bool, tp_group=None
-    ):
+    def __init__(self, attn, head_dim, is_kv_eq_v, encoder_mode: bool, tp_group=None):
         super().__init__()
         self.q_proj = attn.q_proj
         self.k_proj = attn.k_proj
@@ -217,9 +214,7 @@ class _DiffGemmaAttn(nn.Module):
         num_q_heads = self.q_proj.weight.shape[0] // self.head_dim
         num_kv_heads = self.k_proj.weight.shape[0] // self.head_dim
 
-        q = self.q_proj(hidden_states).view(
-            bsz, seq_len, num_q_heads, self.head_dim
-        )
+        q = self.q_proj(hidden_states).view(bsz, seq_len, num_q_heads, self.head_dim)
         k_lin = self.k_proj(hidden_states).view(
             bsz, seq_len, num_kv_heads, self.head_dim
         )
@@ -271,6 +266,7 @@ class _DiffGemmaAttn(nn.Module):
             # data type BFLOAT16" at allreduce_plan time.  Cast to fp16 for the
             # all-reduce and cast back to preserve the model's working dtype.
             import torch.distributed as dist
+
             orig_dtype = out.dtype
             if orig_dtype == torch.bfloat16:
                 out = out.to(torch.float16)
@@ -296,7 +292,15 @@ class _DiffGemmaBlockAttn(nn.Module):
         self.input_layernorm = layer.input_layernorm
         self.train(layer.training)
 
-    def forward(self, hidden_states, selected_freqs, attn_mask, key_cache, value_cache, cache_index):
+    def forward(
+        self,
+        hidden_states,
+        selected_freqs,
+        attn_mask,
+        key_cache,
+        value_cache,
+        cache_index,
+    ):
         residual = hidden_states
         h = self.input_layernorm(hidden_states)
         attn_out, key_cache, value_cache = self.self_attn(
@@ -334,6 +338,7 @@ class _DiffGemmaBlockMLP(nn.Module):
             # Cast to fp16 for the collective — bf16 is not supported by Spyre
             # hardware's 'add' (sum) reduction (allreduce_plan rejects dtype 15).
             import torch.distributed as dist
+
             orig_dtype = h.dtype
             if orig_dtype == torch.bfloat16:
                 h = h.to(torch.float16)
@@ -344,7 +349,9 @@ class _DiffGemmaBlockMLP(nn.Module):
 
 
 def _compile_block(layer, head_dim, is_kv_eq_v, encoder_mode, tp_group=None):
-    attn_block = _DiffGemmaBlockAttn(layer, head_dim, is_kv_eq_v, encoder_mode, tp_group=tp_group)
+    attn_block = _DiffGemmaBlockAttn(
+        layer, head_dim, is_kv_eq_v, encoder_mode, tp_group=tp_group
+    )
     mlp_block = _DiffGemmaBlockMLP(layer, tp_group=tp_group)
     return (
         torch.compile(attn_block, dynamic=False),
@@ -425,8 +432,6 @@ def _build_decoder_mask(
     return mask
 
 
-
-
 def _finish_layer(layer, dense_1, residual, layer_scalar):
     """Combine dense MLP + MoE outputs and apply the layer residual + scalar.
 
@@ -461,7 +466,18 @@ def _finish_layer(layer, dense_1, residual, layer_scalar):
     return h_cpu.to(dev).contiguous()
 
 
-def _run_layer(compiled_attn, compiled_mlp, layer, h, freq, mask, key_cache, value_cache, cache_index, layer_scalar):
+def _run_layer(
+    compiled_attn,
+    compiled_mlp,
+    layer,
+    h,
+    freq,
+    mask,
+    key_cache,
+    value_cache,
+    cache_index,
+    layer_scalar,
+):
     """Run one encoder/decoder layer: attn half → mlp half → MoE on CPU.
 
     Under TP, ``o_proj`` and ``down_proj`` outputs are all-reduced inside the
@@ -509,8 +525,16 @@ def _run_encoder_blocks(
         lt = cfg.layer_types[i]
         ls = float(enc_text.layers[i].layer_scalar)
         h, key_caches[i], value_caches[i] = _run_layer(
-            compiled_attn, compiled_mlp, enc_text.layers[i],
-            h, freqs[lt], masks[lt], key_caches[i], value_caches[i], cache_index, ls,
+            compiled_attn,
+            compiled_mlp,
+            enc_text.layers[i],
+            h,
+            freqs[lt],
+            masks[lt],
+            key_caches[i],
+            value_caches[i],
+            cache_index,
+            ls,
         )
 
     enc_text.norm(h)  # final encoder norm — result discarded, KV caches are the output
@@ -565,10 +589,22 @@ def _run_decoder_blocks(
         ls = float(dec.layers[i].layer_scalar)
         # Decoder mask per-layer-type (full_attention uses plain bidirectional,
         # sliding_attention intersects with the sliding window).
-        mask = decoder_attn_mask[lt] if isinstance(decoder_attn_mask, dict) else decoder_attn_mask
+        mask = (
+            decoder_attn_mask[lt]
+            if isinstance(decoder_attn_mask, dict)
+            else decoder_attn_mask
+        )
         h, _, _ = _run_layer(
-            compiled_attn, compiled_mlp, dec.layers[i],
-            h, freqs[lt], mask, key_caches[i], value_caches[i], decoder_cache_index, ls,
+            compiled_attn,
+            compiled_mlp,
+            dec.layers[i],
+            h,
+            freqs[lt],
+            mask,
+            key_caches[i],
+            value_caches[i],
+            decoder_cache_index,
+            ls,
         )
 
     return h
@@ -637,7 +673,12 @@ def _run_decoder_forward(
 
 
 def generate(
-    model, input_ids, attention_mask=None, max_new_tokens=256, max_denoising_steps=48, **kwargs
+    model,
+    input_ids,
+    attention_mask=None,
+    max_new_tokens=256,
+    max_denoising_steps=48,
+    **kwargs,
 ):
     """Spyre block-diffusion generate loop for DiffusionGemma.
 
@@ -675,7 +716,6 @@ def generate(
     )
 
     from hf_adapters.hf_common import (
-        BLOCK_SIZE,
         allocate_kv_caches,
         build_prefill_mask,
         generation_cache_len,
@@ -1032,6 +1072,7 @@ def prepare_for_spyre(model):
     #    Under TP, pass the process group so the compiled blocks insert all-reduces.
     #    MoE stays in the HF layer objects and runs on CPU via _finish_layer.
     import os
+
     import torch.distributed as dist
 
     tp_group = None
@@ -1069,8 +1110,16 @@ def prepare_for_spyre(model):
         head_dim = layer_cfg.head_dim
         is_kv_eq_v = is_kv_eq_v_per_layer[i]
 
-        enc_compiled.append(_compile_block(layer_enc, head_dim, is_kv_eq_v, encoder_mode=True, tp_group=tp_group))
-        dec_compiled.append(_compile_block(layer_dec, head_dim, is_kv_eq_v, encoder_mode=False, tp_group=tp_group))
+        enc_compiled.append(
+            _compile_block(
+                layer_enc, head_dim, is_kv_eq_v, encoder_mode=True, tp_group=tp_group
+            )
+        )
+        dec_compiled.append(
+            _compile_block(
+                layer_dec, head_dim, is_kv_eq_v, encoder_mode=False, tp_group=tp_group
+            )
+        )
 
     model._spyre_enc_compiled_blocks = enc_compiled
     model._spyre_dec_compiled_blocks = dec_compiled

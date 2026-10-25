@@ -39,7 +39,9 @@ if str(CACHE_CONFIG_DIR) not in sys.path:
 import manage_cache  # noqa: E402
 
 
-def test_manage_cache_rejects_non_mapping_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_manage_cache_rejects_non_mapping_yaml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """exclude.yaml must be a YAML mapping."""
     bad_file = tmp_path / "exclude.yaml"
     bad_file.write_text("- not-a-dict\n")
@@ -77,7 +79,10 @@ def test_manage_cache_ppc64le_excludes_registry_and_extra_models() -> None:
 
     with patch("platform.machine", return_value="ppc64le"):
         excluded = manage_cache._load_excluded_paths()
-        models = sorted((set(manage_cache._registry_model_paths(excluded=excluded)) | set(extra)) - excluded)
+        models = sorted(
+            (set(manage_cache._registry_model_paths(excluded=excluded)) | set(extra))
+            - excluded
+        )
 
         assert not any("Qwen" in m or "qwen" in m for m in models)
         assert "custom-org/valid-extra-model" in models
@@ -98,7 +103,10 @@ def test_pytest_generate_tests_mixed_overrides_ppc64le() -> None:
     import tests.conftest as conftest_mod
 
     metafunc = MagicMock()
-    metafunc.config.getoption.return_value = ["Qwen/Qwen3-0.6B", "ibm-granite/granite-4.1-8b"]
+    metafunc.config.getoption.return_value = [
+        "Qwen/Qwen3-0.6B",
+        "ibm-granite/granite-4.1-8b",
+    ]
     metafunc.fixturenames = ["model_path"]
     metafunc.definition.iter_markers.return_value = []
     metafunc.definition.own_markers = []
@@ -106,6 +114,7 @@ def test_pytest_generate_tests_mixed_overrides_ppc64le() -> None:
 
     with patch("platform.machine", return_value="ppc64le"):
         import tests.model_registry as mr
+
         importlib.reload(mr)
         conftest_mod.pytest_generate_tests(metafunc)
 
@@ -127,6 +136,7 @@ def test_pytest_generate_tests_all_excluded_overrides_ppc64le() -> None:
 
     with patch("platform.machine", return_value="ppc64le"):
         import tests.model_registry as mr
+
         importlib.reload(mr)
         conftest_mod.pytest_generate_tests(metafunc)
 
@@ -148,5 +158,6 @@ def test_perf_list_validation_passes_on_both_architectures() -> None:
     for arch in ("x86_64", "ppc64le"):
         with patch("platform.machine", return_value=arch):
             import tests.model_registry as mr
+
             importlib.reload(mr)
             test_every_perf_list_file_is_benchmarkable()

@@ -59,7 +59,9 @@ def _load_excluded_paths() -> frozenset[str]:
     return frozenset(excluded)
 
 
-def _registry_model_paths(excluded: set[str] | frozenset[str] | None = None) -> list[str]:
+def _registry_model_paths(
+    excluded: set[str] | frozenset[str] | None = None,
+) -> list[str]:
     """Every HF repo referenced by tests/model_registry.py, excluding architecture-specific exclusions."""
     text = MODEL_REGISTRY_PATH.read_text(encoding="utf-8")
     paths = set(_PATH_ENTRY_RE.findall(text))
@@ -86,7 +88,9 @@ def main():
             print(f"❌ Error parsing {config_file}: {e}")
             sys.exit(1)
     excluded = set(_load_excluded_paths())
-    models = sorted((set(_registry_model_paths(excluded=excluded)) | set(extra_models)) - excluded)
+    models = sorted(
+        (set(_registry_model_paths(excluded=excluded)) | set(extra_models)) - excluded
+    )
     if not models:
         print(f"⚠️ Warning: No models found in the registry or {config_file}.")
         sys.exit(0)

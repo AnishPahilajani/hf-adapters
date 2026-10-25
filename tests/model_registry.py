@@ -1001,6 +1001,14 @@ ALL_CAUSAL_PATHS: list[str] = _exclude(
         predicate=lambda info: info.get("kind") not in (*DRAFTER_KINDS, "diffusion"),
     )
 )
+GLOBAL_ALL_CAUSAL_PATHS: list[str] = _exclude(
+    _all_paths(
+        CAUSAL_LM_MODELS,
+        include_gated=_include_gated_flag,
+        predicate=lambda info: info.get("kind") not in (*DRAFTER_KINDS, "diffusion"),
+    ),
+    arch_specific=False,
+)
 ALL_EMBED_PATHS: list[str] = _exclude(
     _all_paths(EMBEDDING_MODELS, include_gated=_include_gated_flag)
 )

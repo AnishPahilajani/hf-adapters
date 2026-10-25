@@ -20,6 +20,7 @@
 # limitations under the License.
 
 import os
+import platform
 import re
 import sys
 from pathlib import Path
@@ -30,14 +31,33 @@ from huggingface_hub import snapshot_download
 MODEL_REGISTRY_PATH = (
     Path(__file__).resolve().parents[2] / "tests" / "model_registry.py"
 )
+EXCLUDE_FILE_PATH = (
+    Path(__file__).resolve().parents[2] / "tests" / "model_lists" / "exclude.yaml"
+)
 # Matches every `"path": "org/repo"` entry across the registry's model dicts.
 _PATH_ENTRY_RE = re.compile(r'"path":\s*"([^"]+)"')
 
 
+def _load_excluded_paths() -> set[str]:
+    """Load excluded model paths from tests/model_lists/exclude.yaml."""
+    if not EXCLUDE_FILE_PATH.is_file():
+        return set()
+    with open(EXCLUDE_FILE_PATH, encoding="utf-8") as f:
+        try:
+            data = yaml.safe_load(f) or {}
+        except Exception:
+            return set()
+    excluded = set(data.get("models") or [])
+    if platform.machine() == "ppc64le":
+        excluded |= set(data.get("ppc64le_models") or [])
+    return excluded
+
+
 def _registry_model_paths() -> list[str]:
-    """Every HF repo referenced by tests/model_registry.py, so the cache can't drift from what CI actually tests."""
+    """Every HF repo referenced by tests/model_registry.py, excluding architecture-specific exclusions."""
     text = MODEL_REGISTRY_PATH.read_text(encoding="utf-8")
-    return sorted(set(_PATH_ENTRY_RE.findall(text)))
+    paths = set(_PATH_ENTRY_RE.findall(text))
+    return sorted(paths - _load_excluded_paths())
 
 
 def main():
@@ -58,7 +78,8 @@ def main():
         except Exception as e:
             print(f"❌ Error parsing {config_file}: {e}")
             sys.exit(1)
-    models = sorted(set(_registry_model_paths()) | set(extra_models))
+    excluded = _load_excluded_paths()
+    models = sorted((set(_registry_model_paths()) | set(extra_models)) - excluded)
     if not models:
         print(f"⚠️ Warning: No models found in the registry or {config_file}.")
         sys.exit(0)

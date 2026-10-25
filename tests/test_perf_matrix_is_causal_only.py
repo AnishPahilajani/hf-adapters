@@ -14,7 +14,6 @@ import pytest
 import yaml
 
 from tests.model_registry import (
-    ALL_CAUSAL_PATHS,
     CAUSAL_PATHS,
     EMBED_PATHS,
     GLOBAL_ALL_CAUSAL_PATHS,

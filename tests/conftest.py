@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import platform
 import sys
 import types
 import warnings
@@ -291,6 +292,20 @@ def pytest_generate_tests(metafunc: Metafunc) -> None:
     import model_registry
 
     overrides = model_registry._exclude(raw_overrides)
+    if not overrides:
+        # All requested paths are excluded on this architecture. Rather than raising
+        # pytest's empty parameter set error, parametrize with skipped items explaining why.
+        params = [
+            pytest.param(
+                path,
+                marks=pytest.mark.skip(
+                    reason=f"Model path '{path}' is excluded on {platform.machine()} (see tests/model_lists/exclude.yaml)"
+                ),
+            )
+            for path in raw_overrides
+        ]
+        metafunc.parametrize("model_path", params, ids=raw_overrides)
+        return
 
     harness_marker = metafunc.definition.get_closest_marker("model_harness")
     harness = harness_marker.args[0] if harness_marker else None

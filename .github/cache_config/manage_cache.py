@@ -28,36 +28,34 @@ from pathlib import Path
 import yaml
 from huggingface_hub import snapshot_download
 
-MODEL_REGISTRY_PATH = (
-    Path(__file__).resolve().parents[2] / "tests" / "model_registry.py"
-)
-EXCLUDE_FILE_PATH = (
-    Path(__file__).resolve().parents[2] / "tests" / "model_lists" / "exclude.yaml"
-)
+REPO_ROOT = Path(__file__).resolve().parents[2]
+MODEL_REGISTRY_PATH = REPO_ROOT / "tests" / "model_registry.py"
+EXCLUDE_FILE_PATH = REPO_ROOT / "tests" / "model_lists" / "exclude.yaml"
 # Matches every `"path": "org/repo"` entry across the registry's model dicts.
 _PATH_ENTRY_RE = re.compile(r'"path":\s*"([^"]+)"')
 
 
-def _load_excluded_paths() -> set[str]:
+def _load_excluded_paths() -> frozenset[str]:
     """Load excluded model paths from tests/model_lists/exclude.yaml."""
     if not EXCLUDE_FILE_PATH.is_file():
-        return set()
+        raise FileNotFoundError(f"Missing exclusions file: {EXCLUDE_FILE_PATH}")
     with open(EXCLUDE_FILE_PATH, encoding="utf-8") as f:
-        try:
-            data = yaml.safe_load(f) or {}
-        except Exception:
-            return set()
-    excluded = set(data.get("models") or [])
+        data = yaml.safe_load(f)
+    if not isinstance(data, dict):
+        raise ValueError(f"{EXCLUDE_FILE_PATH} did not parse to a mapping")
+
+    excluded: set[str] = set(data.get("models") or [])
     if platform.machine() == "ppc64le":
         excluded |= set(data.get("ppc64le_models") or [])
-    return excluded
+    return frozenset(excluded)
 
 
-def _registry_model_paths() -> list[str]:
+def _registry_model_paths(excluded: set[str] | frozenset[str] | None = None) -> list[str]:
     """Every HF repo referenced by tests/model_registry.py, excluding architecture-specific exclusions."""
     text = MODEL_REGISTRY_PATH.read_text(encoding="utf-8")
     paths = set(_PATH_ENTRY_RE.findall(text))
-    return sorted(paths - _load_excluded_paths())
+    excluded_set = set(_load_excluded_paths()) if excluded is None else set(excluded)
+    return sorted(paths - excluded_set)
 
 
 def main():
@@ -78,8 +76,8 @@ def main():
         except Exception as e:
             print(f"❌ Error parsing {config_file}: {e}")
             sys.exit(1)
-    excluded = _load_excluded_paths()
-    models = sorted((set(_registry_model_paths()) | set(extra_models)) - excluded)
+    excluded = set(_load_excluded_paths())
+    models = sorted((set(_registry_model_paths(excluded=excluded)) | set(extra_models)) - excluded)
     if not models:
         print(f"⚠️ Warning: No models found in the registry or {config_file}.")
         sys.exit(0)

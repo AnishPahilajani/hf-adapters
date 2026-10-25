@@ -44,6 +44,15 @@ def _load_excluded_paths() -> frozenset[str]:
     if not isinstance(data, dict):
         raise ValueError(f"{EXCLUDE_FILE_PATH} did not parse to a mapping")
 
+    for key in ("models", "ppc64le_models"):
+        val = data.get(key)
+        if val is not None and not (
+            isinstance(val, list) and all(isinstance(x, str) for x in val)
+        ):
+            raise ValueError(
+                f"{EXCLUDE_FILE_PATH} '{key}' section must be a list of strings (got {type(val).__name__})"
+            )
+
     excluded: set[str] = set(data.get("models") or [])
     if platform.machine() == "ppc64le":
         excluded |= set(data.get("ppc64le_models") or [])

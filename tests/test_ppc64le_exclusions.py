@@ -188,3 +188,202 @@ def test_pytest_generate_tests_x86_64_retains_qwen() -> None:
             "Qwen/Qwen3-0.6B",
             "ibm-granite/granite-4.1-8b",
         ]
+
+
+def test_perf_models_filtered_on_ppc64le() -> None:
+    """Perf models are filtered on ppc64le to exclude Qwen models, but kept on x86_64."""
+    perf_models = [
+        "Qwen/Qwen2.5-1.5B",
+        "Qwen/Qwen3-0.6B",
+        "Qwen/Qwen3.5-2B",
+        "Qwen/Qwen3.6-35B-A3B",
+        "ibm-granite/granite-3.3-2b-instruct",
+    ]
+
+    with patch("platform.machine", return_value="ppc64le"):
+        import model_registry as mr
+
+        importlib.reload(mr)
+        filtered = mr._exclude(perf_models)
+        assert filtered == ["ibm-granite/granite-3.3-2b-instruct"]
+
+    with patch("platform.machine", return_value="x86_64"):
+        import model_registry as mr
+
+        importlib.reload(mr)
+        filtered = mr._exclude(perf_models)
+        assert filtered == perf_models
+
+
+def test_load_tests_model_path_exclusion_resolution() -> None:
+    """Explicitly excluded models in MODEL_PATH resolve to empty, while valid ones resolve."""
+    with patch("platform.machine", return_value="ppc64le"):
+        import model_registry as mr
+
+        importlib.reload(mr)
+        # All excluded
+        to_run, invalid = mr.resolve_load_test_models(["Qwen/Qwen3-0.6B"])
+        assert to_run == []
+        assert invalid == []
+
+        # Mixed valid + excluded
+        to_run, invalid = mr.resolve_load_test_models(
+            ["Qwen/Qwen3-0.6B", "ibm-granite/granite-3.3-2b-instruct"]
+        )
+        assert to_run == ["ibm-granite/granite-3.3-2b-instruct"]
+        assert invalid == []
+
+        # Mixed valid + invalid
+        to_run, invalid = mr.resolve_load_test_models(
+            ["ibm-granite/granite-3.3-2b-instruct", "invalid-nonexistent-model"]
+        )
+        assert to_run == ["ibm-granite/granite-3.3-2b-instruct"]
+        assert invalid == ["invalid-nonexistent-model"]
+
+
+@pytest.mark.skipif(
+    importlib.import_module("platform").machine() != "ppc64le",
+    reason="Only runs on native ppc64le",
+)
+def test_makefile_load_tests_all_excluded_skips_ppc64le(tmp_path: Path) -> None:
+    """make load-tests with an excluded model on ppc64le exits 0 and records a skip."""
+    import subprocess
+
+    junit_file = tmp_path / "junit-load.xml"
+    result = subprocess.run(
+        [
+            "make",
+            "load-tests",
+            "MODEL_PATH=Qwen/Qwen3-0.6B",
+            f"JUNIT_XML={junit_file}",
+        ],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "skipping load-tests" in result.stdout
+    assert junit_file.exists()
+
+
+@pytest.mark.skipif(
+    importlib.import_module("platform").machine() != "ppc64le",
+    reason="Only runs on native ppc64le",
+)
+def test_makefile_load_tests_invalid_model_fails(tmp_path: Path) -> None:
+    """make load-tests with an unlisted/invalid model exits non-zero (preserves failure)."""
+    import subprocess
+
+    result = subprocess.run(
+        [
+            "make",
+            "load-tests",
+            "MODEL_PATH=nonexistent-invalid-model-foo",
+        ],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "Invalid model path(s)" in result.stderr
+
+
+@pytest.mark.skipif(
+    importlib.import_module("platform").machine() != "ppc64le",
+    reason="Only runs on native ppc64le",
+)
+def test_makefile_load_tests_mixed_valid_and_invalid_fails(tmp_path: Path) -> None:
+    """make load-tests with mixed valid and invalid models fails on the invalid model."""
+    import subprocess
+
+    result = subprocess.run(
+        [
+            "make",
+            "load-tests",
+            "MODEL_PATH=ibm-granite/granite-3.3-2b-instruct nonexistent-invalid-model-foo",
+        ],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "Invalid model path(s)" in result.stderr
+
+
+@pytest.mark.skipif(
+    importlib.import_module("platform").machine() != "ppc64le",
+    reason="Only runs on native ppc64le",
+)
+def test_makefile_perf_tests_recording_stub_ppc64le(tmp_path: Path) -> None:
+    """make perf-tests invokes spyre-perf-suite only for non-excluded models on ppc64le."""
+    import subprocess
+
+    log_file = tmp_path / "invoked_models.log"
+    stub_script = tmp_path / "mock_spyre_perf_suite.sh"
+    stub_content = f"""#!/bin/bash
+if [[ "$1" == "--help" ]]; then
+    exit 0
+fi
+model=""
+report=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --hf-model) model="$2"; shift 2 ;;
+        --report) report="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+echo "$model" >> "{log_file}"
+if [[ -n "$report" ]]; then
+    xml_report="${{report%.txt}}.xml"
+    echo '<testsuites><testsuite name="perf"/></testsuites>' > "$xml_report"
+fi
+exit 0
+"""
+    stub_script.write_text(stub_content)
+    stub_script.chmod(0o755)
+
+    results_dir = tmp_path / "results"
+    result = subprocess.run(
+        [
+            "make",
+            "perf-tests",
+            f"PERF_SUITE={stub_script}",
+            "MODEL_PATH=Qwen/Qwen3-0.6B ibm-granite/granite-3.3-2b-instruct",
+            f"RESULTS_DIR={results_dir}",
+            "PERF_REPORT=split",
+        ],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    invoked = log_file.read_text().strip().splitlines()
+    assert invoked == ["ibm-granite/granite-3.3-2b-instruct"]
+
+
+@pytest.mark.skipif(
+    importlib.import_module("platform").machine() != "ppc64le",
+    reason="Only runs on native ppc64le",
+)
+def test_makefile_perf_tests_all_excluded_skips_ppc64le(tmp_path: Path) -> None:
+    """make perf-tests with only excluded models skips without invoking the harness."""
+    import subprocess
+
+    results_dir = tmp_path / "results"
+    result = subprocess.run(
+        [
+            "make",
+            "perf-tests",
+            "PERF_SUITE=/bin/false",
+            "MODEL_PATH=Qwen/Qwen3-0.6B Qwen/Qwen3.5-2B",
+            f"RESULTS_DIR={results_dir}",
+            "PERF_REPORT=combined",
+        ],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "skipping perf-tests" in result.stdout
+    assert (results_dir / "report.xml").exists()

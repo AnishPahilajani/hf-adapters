@@ -1173,3 +1173,37 @@ SEQ_CLASSIFICATION_PATHS: list[str] = _exclude(
 ALL_SEQ_CLASSIFICATION_PATHS: list[str] = _exclude(
     _all_paths(SEQ_CLASSIFICATION_MODELS, include_gated=_include_gated_flag)
 )
+
+
+def get_load_test_paths() -> frozenset[str]:
+    """Return all valid registered model paths exercised by load tests."""
+    return frozenset(
+        CAUSAL_PATHS
+        + EMBED_PATHS
+        + MASKED_LM_PATHS
+        + QUESTION_ANSWERING_PATHS
+        + SEQ_CLASSIFICATION_PATHS
+        + TOKEN_CLASSIFICATION_PATHS
+    )
+
+
+def resolve_load_test_models(
+    raw_models: list[str],
+) -> tuple[list[str], list[str]]:
+    """Partition requested model paths into (valid_models_to_run, invalid_models).
+
+    Models excluded on the current architecture are filtered out as intentional skips.
+    Any remaining model not present in registered load test paths is returned as invalid.
+    """
+    excluded = _load_excluded_paths()
+    valid_load_paths = get_load_test_paths()
+    to_run: list[str] = []
+    invalid: list[str] = []
+    for model in raw_models:
+        if model in excluded:
+            continue
+        if model in valid_load_paths:
+            to_run.append(model)
+        else:
+            invalid.append(model)
+    return to_run, invalid

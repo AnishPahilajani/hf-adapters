@@ -78,11 +78,7 @@ def test_manage_cache_ppc64le_excludes_registry_and_extra_models() -> None:
     extra = ["Qwen/Qwen3-0.6B", "custom-org/valid-extra-model"]
 
     with patch("platform.machine", return_value="ppc64le"):
-        excluded = manage_cache._load_excluded_paths()
-        models = sorted(
-            (set(manage_cache._registry_model_paths(excluded=excluded)) | set(extra))
-            - excluded
-        )
+        models = manage_cache.build_download_list(extra_models=extra)
 
         assert not any("Qwen" in m or "qwen" in m for m in models)
         assert "custom-org/valid-extra-model" in models
@@ -92,8 +88,7 @@ def test_manage_cache_ppc64le_excludes_registry_and_extra_models() -> None:
 def test_manage_cache_x86_includes_qwen_models() -> None:
     """Under simulated x86_64, Qwen models remain present."""
     with patch("platform.machine", return_value="x86_64"):
-        excluded = manage_cache._load_excluded_paths()
-        models = manage_cache._registry_model_paths(excluded=excluded)
+        models = manage_cache.build_download_list()
 
         assert any("Qwen" in m or "qwen" in m for m in models)
 

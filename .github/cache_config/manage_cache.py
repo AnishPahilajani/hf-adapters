@@ -69,6 +69,13 @@ def _registry_model_paths(
     return sorted(paths - excluded_set)
 
 
+def build_download_list(extra_models: list[str] | None = None) -> list[str]:
+    """Assemble and return the final filtered list of models to download."""
+    excluded = set(_load_excluded_paths())
+    extra = set(extra_models or [])
+    return sorted((set(_registry_model_paths(excluded=excluded)) | extra) - excluded)
+
+
 def main():
     token = os.getenv("HF_TOKEN")
     force = os.getenv("FORCE_DOWNLOAD") == "true"
@@ -87,10 +94,7 @@ def main():
         except Exception as e:
             print(f"❌ Error parsing {config_file}: {e}")
             sys.exit(1)
-    excluded = set(_load_excluded_paths())
-    models = sorted(
-        (set(_registry_model_paths(excluded=excluded)) | set(extra_models)) - excluded
-    )
+    models = build_download_list(extra_models=extra_models)
     if not models:
         print(f"⚠️ Warning: No models found in the registry or {config_file}.")
         sys.exit(0)

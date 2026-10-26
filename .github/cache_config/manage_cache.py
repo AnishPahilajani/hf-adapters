@@ -44,11 +44,16 @@ def _load_excluded_paths() -> frozenset[str]:
     if not isinstance(data, dict):
         raise ValueError(f"{EXCLUDE_FILE_PATH} did not parse to a mapping")
 
-    for key in ("models", "ppc64le_models"):
-        val = data.get(key)
-        if val is not None and not (
-            isinstance(val, list) and all(isinstance(x, str) for x in val)
-        ):
+    allowed_sections = {"models", "ppc64le_models"}
+    unexpected = set(data.keys()) - allowed_sections
+    if unexpected:
+        raise ValueError(
+            f"{EXCLUDE_FILE_PATH} contains unexpected section(s): {sorted(unexpected)}; "
+            f"allowed: {sorted(allowed_sections)}"
+        )
+
+    for key, val in data.items():
+        if not (isinstance(val, list) and all(isinstance(x, str) for x in val)):
             raise ValueError(
                 f"{EXCLUDE_FILE_PATH} '{key}' section must be a list of strings (got {type(val).__name__})"
             )

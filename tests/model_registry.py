@@ -813,33 +813,36 @@ def _load_excluded_paths(arch_specific: bool = True) -> frozenset[str]:
     are never downloaded or run on that architecture.  Pass
     ``arch_specific=False`` to load only the architecture-independent list.
     """
+    import yaml
+
     exclude_file = os.path.join(
         os.path.dirname(__file__), "model_lists", "exclude.yaml"
     )
     if not os.path.isfile(exclude_file):
         return frozenset()
 
-    on_ppc64le = arch_specific and platform.machine() == "ppc64le"
+    with open(exclude_file, encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    if not isinstance(data, dict):
+        raise ValueError(f"{exclude_file} did not parse to a mapping")
 
-    excluded: set[str] = set()
-    # Simple line-by-line parse: track which top-level key we are under so we
-    # can apply per-section logic without pulling in a YAML library.
-    current_section: str | None = None
-    with open(exclude_file) as f:
-        for line in f:
-            stripped = line.split("#", 1)[0].strip()
-            if not stripped:
-                continue
-            # Detect top-level section headers (no leading whitespace, ends with ':')
-            if not line[0].isspace() and stripped.endswith(":"):
-                current_section = stripped[:-1]
-                continue
-            if stripped.startswith("- "):
-                path = stripped[2:].strip()
-                if current_section == "models":
-                    excluded.add(path)
-                elif current_section == "ppc64le_models" and on_ppc64le:
-                    excluded.add(path)
+    allowed_sections = {"models", "ppc64le_models"}
+    unexpected = set(data.keys()) - allowed_sections
+    if unexpected:
+        raise ValueError(
+            f"{exclude_file} contains unexpected section(s): {sorted(unexpected)}; "
+            f"allowed: {sorted(allowed_sections)}"
+        )
+
+    for key, val in data.items():
+        if not (isinstance(val, list) and all(isinstance(x, str) for x in val)):
+            raise ValueError(
+                f"{exclude_file} '{key}' section must be a list of strings (got {type(val).__name__})"
+            )
+
+    excluded: set[str] = set(data.get("models") or [])
+    if arch_specific and platform.machine() == "ppc64le":
+        excluded |= set(data.get("ppc64le_models") or [])
     return frozenset(excluded)
 
 

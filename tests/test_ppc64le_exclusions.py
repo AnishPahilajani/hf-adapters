@@ -50,10 +50,23 @@ def test_manage_cache_rejects_non_mapping_yaml(
         manage_cache._load_excluded_paths()
 
 
+def test_manage_cache_rejects_unexpected_sections(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """exclude.yaml must only contain allowed sections."""
+    bad_file = tmp_path / "exclude.yaml"
+    bad_file.write_text("s390x-models:\n  - model/foo\n")
+    monkeypatch.setattr(manage_cache, "EXCLUDE_FILE_PATH", bad_file)
+
+    with pytest.raises(ValueError, match="contains unexpected section"):
+        manage_cache._load_excluded_paths()
+
+
 @pytest.mark.parametrize("key", ["models", "ppc64le_models"])
 @pytest.mark.parametrize(
     "invalid_val",
     [
+        None,
         "just-a-string",
         123,
         {"nested": "dict"},

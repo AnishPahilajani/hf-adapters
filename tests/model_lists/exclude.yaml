@@ -16,3 +16,5 @@ ppc64le_models:
   - Qwen/Qwen3.6-35B-A3B
   - Qwen/Qwen3-Embedding-0.6B
   - deepseek-ai/dspark_qwen3_4b_block7  # DSpark Qwen3 drafter uses Qwen3 backbone
+  - jinaai/jina-code-embeddings-0.5b    # Qwen2 architecture embedding
+  - UIUC-SSAIL/gemma4-26b-a4b-XPress-b16  # XPress Qwen3-style drafter

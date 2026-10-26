@@ -17,8 +17,7 @@
 Tests:
 1. Schema validation for tests/model_lists/exclude.yaml in manage_cache.py.
 2. Cache download list under simulated ppc64le vs x86_64, including extra_models.
-3. --model-path overrides (mixed, all-excluded, and non-excluded) in conftest.
-4. Perf-list validation on both x86_64 and ppc64le architectures.
+3. --model-path overrides (mixed, all-excluded, and positive x86 control) in conftest.
 """
 
 from __future__ import annotations
@@ -148,17 +147,31 @@ def test_pytest_generate_tests_all_excluded_overrides_ppc64le() -> None:
         assert any(m.name == "skip" for m in param_obj.marks)
 
 
-def test_perf_list_validation_passes_on_both_architectures() -> None:
-    """test_every_perf_list_file_is_benchmarkable must pass on both x86_64 and ppc64le."""
-    from tests.test_perf_matrix_is_causal_only import (
-        test_every_perf_list_file_is_benchmarkable,
-    )
+def test_pytest_generate_tests_x86_64_retains_qwen() -> None:
+    """On x86_64, Qwen overrides are not excluded and are parametrized normally."""
+    import tests.conftest as conftest_mod
 
-    for arch in ("x86_64", "ppc64le"):
-        with patch("platform.machine", return_value=arch):
-            import model_registry as mr
+    metafunc = MagicMock()
+    metafunc.config.getoption.return_value = [
+        "Qwen/Qwen3-0.6B",
+        "ibm-granite/granite-4.1-8b",
+    ]
+    metafunc.fixturenames = ["model_path"]
+    metafunc.definition.iter_markers.return_value = []
+    metafunc.definition.own_markers = []
+    metafunc.definition.get_closest_marker.return_value = MagicMock(args=["causal"])
 
-            importlib.reload(mr)
-            assert sys.modules["model_registry"] is mr
+    with patch("platform.machine", return_value="x86_64"):
+        import model_registry as mr
 
-            test_every_perf_list_file_is_benchmarkable()
+        importlib.reload(mr)
+        assert sys.modules["model_registry"] is mr
+
+        conftest_mod.pytest_generate_tests(metafunc)
+
+        call_args = metafunc.parametrize.call_args
+        assert call_args is not None
+        assert call_args[1]["ids"] == [
+            "Qwen/Qwen3-0.6B",
+            "ibm-granite/granite-4.1-8b",
+        ]

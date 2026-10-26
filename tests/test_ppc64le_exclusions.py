@@ -108,9 +108,11 @@ def test_pytest_generate_tests_mixed_overrides_ppc64le() -> None:
     metafunc.definition.get_closest_marker.return_value = MagicMock(args=["causal"])
 
     with patch("platform.machine", return_value="ppc64le"):
-        import tests.model_registry as mr
+        import model_registry as mr
 
         importlib.reload(mr)
+        assert sys.modules["model_registry"] is mr
+
         conftest_mod.pytest_generate_tests(metafunc)
 
         call_args = metafunc.parametrize.call_args
@@ -130,9 +132,11 @@ def test_pytest_generate_tests_all_excluded_overrides_ppc64le() -> None:
     metafunc.definition.get_closest_marker.return_value = MagicMock(args=["causal"])
 
     with patch("platform.machine", return_value="ppc64le"):
-        import tests.model_registry as mr
+        import model_registry as mr
 
         importlib.reload(mr)
+        assert sys.modules["model_registry"] is mr
+
         conftest_mod.pytest_generate_tests(metafunc)
 
         call_args = metafunc.parametrize.call_args
@@ -152,7 +156,9 @@ def test_perf_list_validation_passes_on_both_architectures() -> None:
 
     for arch in ("x86_64", "ppc64le"):
         with patch("platform.machine", return_value=arch):
-            import tests.model_registry as mr
+            import model_registry as mr
 
             importlib.reload(mr)
+            assert sys.modules["model_registry"] is mr
+
             test_every_perf_list_file_is_benchmarkable()
